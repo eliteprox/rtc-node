@@ -1,0 +1,42 @@
+{
+    "pipeline": "streamdiffusion",
+    "params": {
+        "model_id": "stabilityai/sd-turbo",
+        "prompt": "A beautiful landsape",
+        "prompt_interpolation_method": "linear",
+        "normalize_prompt_weights": true,
+        "normalize_seed_weights": true,
+        "negative_prompt": "",
+        "guidance_scale": 123,
+        "delta": 123,
+        "num_inference_steps": 100,
+        "t_index_list": [
+            0
+        ],
+        "use_safety_checker": true,
+        "width": 704,
+        "height": 704,
+        "lora_dict": {},
+        "use_lcm_lora": true,
+        "lcm_lora_id": "",
+        "acceleration": "none",
+        "use_denoising_batch": true,
+        "do_add_noise": true,
+        "seed": 1664858461,
+        "seed_interpolation_method": "linear",
+        "enable_similar_image_filter": true,
+        "similar_image_filter_threshold": 0.5,
+        "similar_image_filter_max_skip_frame": 4503599627370495,
+        "controlnets": [
+            {
+                "model_id": "thibaud/controlnet-sd21-openpose-diffusers",
+                "conditioning_scale": 0.5,
+                "preprocessor": "pose_tensorrt",
+                "preprocessor_params": {},
+                "enabled": true,
+                "control_guidance_start": 0.5,
+                "control_guidance_end": 0.5
+            }
+        ]
+    }
+}

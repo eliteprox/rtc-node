@@ -1,0 +1,24 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File with Arguments",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "stream_whip.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--pipeline-config", "./pipeline_config.json",
+                "--video-file", "./test.mp4",
+                "--duration", "60",
+                "--api-url", "https://api.daydream.live/v1/streams",
+                "--api-key", ""
+            ],
+            "python": "${command:python.interpreterPath}"
+        }
+    ]
+}
