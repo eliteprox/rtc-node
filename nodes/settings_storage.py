@@ -1,5 +1,5 @@
 """
-Lightweight settings storage for RTC stream server configuration.
+Lightweight settings storage for local API server configuration.
 """
 
 import json
@@ -11,9 +11,12 @@ from pathlib import Path
 
 LOGGER = logging.getLogger("rtc_stream.settings")
 
+LEGACY_PORT = 8890
+DEFAULT_PORT = 8895
+
 DEFAULT_SETTINGS = {
     "host": "127.0.0.1",
-    "port": 8890,
+    "port": DEFAULT_PORT,
     "pipeline_config": "pipeline_config.json",
     "video_file": "",
 }
@@ -46,6 +49,14 @@ def load_settings() -> dict:
 
         merged = DEFAULT_SETTINGS.copy()
         merged.update(data)
+        if merged.get("port") == LEGACY_PORT:
+            merged["port"] = DEFAULT_PORT
+            try:
+                with open(path, "w", encoding="utf-8") as fp:
+                    json.dump(merged, fp, indent=2)
+                LOGGER.info("Migrated RTC stream port from %s to %s", LEGACY_PORT, DEFAULT_PORT)
+            except Exception as exc:
+                LOGGER.error("Failed to persist migrated settings: %s", exc)
         return merged
 
 

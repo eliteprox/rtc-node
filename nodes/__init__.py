@@ -1,7 +1,7 @@
 import logging
 import sys
 
-from . import frame_nodes
+from . import api, frame_nodes
 from .server_manager import ensure_server_running
 
 LOGGER = logging.getLogger("rtc_stream.nodes")
@@ -24,7 +24,7 @@ _configure_rtc_logging()
 try:
     ensure_server_running()
 except Exception as exc:
-    LOGGER.error("Unable to start RTC stream server: %s", exc)
+    LOGGER.error("Unable to start local API server: %s", exc)
 
 
 NODE_CLASS_MAPPINGS = {}
