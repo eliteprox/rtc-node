@@ -1,0 +1,149 @@
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urljoin
+
+import requests
+
+
+LOGGER = logging.getLogger("rtc_stream.daydream")
+
+
+@dataclass
+class StreamInfo:
+    whip_url: str
+    playback_id: str
+    stream_id: str
+    whep_url: str = ""
+    stream_name: str = ""
+
+
+def resolve_credentials(api_url: str, api_key: str) -> Tuple[str, str]:
+    """
+    Resolve API credentials using explicit parameters or environment variables.
+    """
+
+    resolved_url = api_url.strip() or os.environ.get("DAYDREAM_API_URL", "").strip()
+    resolved_key = api_key.strip() or os.environ.get("DAYDREAM_API_KEY", "").strip()
+    if not resolved_url or not resolved_key:
+        raise ValueError("Daydream API URL or key missing")
+    return resolved_url, resolved_key
+
+
+def start_stream(
+    api_url: str,
+    api_key: str,
+    pipeline_config: Dict[str, Any],
+    stream_name: str = "",
+    session: Optional[requests.Session] = None,
+) -> StreamInfo:
+    if not isinstance(pipeline_config, dict):
+        raise ValueError("pipeline_config must be dict")
+
+    if "params" in pipeline_config:
+        pipeline_name = pipeline_config.get("pipeline", "streamdiffusion")
+        params_section = pipeline_config.get("params")
+    else:
+        pipeline_name = "streamdiffusion"
+        params_section = pipeline_config
+
+    if not isinstance(params_section, dict):
+        raise ValueError("pipeline_config params must be dict")
+
+    params_payload = json.loads(json.dumps(params_section))
+    if not stream_name:
+        stream_name = f"comfyui-stream-{int(time.time())}"
+
+    stream_request = {"pipeline": pipeline_name, "params": params_payload, "name": stream_name}
+    stream_endpoint = "v1/streams"
+    normalized_api_url = api_url.rstrip("/")
+    if normalized_api_url.endswith("/" + stream_endpoint):
+        create_stream_url = api_url
+    else:
+        create_stream_url = urljoin(normalized_api_url + "/", stream_endpoint)
+
+    sess = session or requests.Session()
+    response = sess.post(
+        create_stream_url,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Accept-Encoding": "identity",
+        },
+        json=stream_request,
+        timeout=30,
+    )
+    if response.status_code != 201:
+        raise RuntimeError(f"Failed to create stream {response.status_code}: {response.text}")
+
+    stream_data = response.json()
+    LOGGER.info("Stream created: %s", stream_data.get("id", "unknown"))
+    return StreamInfo(
+        whip_url=stream_data.get("whip_url", ""),
+        playback_id=stream_data.get("output_playback_id", ""),
+        stream_id=stream_data.get("id", ""),
+        whep_url=stream_data.get("whep_url", ""),
+        stream_name=stream_data.get("name", stream_name),
+    )
+
+
+def poll_stream_status(
+    api_url: str,
+    api_key: str,
+    stream_id: str,
+    timeout: int = 60,
+    interval: float = 2.0,
+    session: Optional[requests.Session] = None,
+) -> Dict[str, Any]:
+    """
+    Poll the Daydream status endpoint until the stream becomes ready or timeout.
+    Returns a dictionary containing the HTTP status code and body payload so
+    callers can differentiate between OFFLINE, NOT FOUND, etc.
+    """
+
+    if not stream_id:
+        raise ValueError("stream_id is required for status polling")
+
+    sess = session or requests.Session()
+    target = urljoin(api_url.rstrip("/") + "/", f"v1/streams/{stream_id}/status")
+
+    deadline = time.time() + timeout
+    last_payload: Dict[str, Any] = {}
+    while time.time() < deadline:
+        response = sess.get(
+            target,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Accept": "application/json",
+                "Accept-Encoding": "identity",
+            },
+            timeout=15,
+        )
+        body = {}
+        try:
+            body = response.json()
+        except ValueError:
+            body = {"error": response.text}
+
+        payload = {"http_status": response.status_code, "body": body}
+
+        if response.status_code == 200:
+            last_payload = payload
+            # When Daydream reports ready/online we can stop polling.
+            body_state = (
+                body.get("status")
+                or body.get("state")
+                or body.get("data", {}).get("state")
+            )
+            if isinstance(body_state, str) and body_state.lower() in ("ready", "online"):
+                return payload
+        else:
+            LOGGER.warning("Status poll failed: %s %s", response.status_code, body)
+            last_payload = payload
+        time.sleep(interval)
+
+    return last_payload
+

@@ -6,7 +6,7 @@
     "configurations": [
 
         {
-            "name": "Python Debugger: Current File with Arguments",
+            "name": "Create and Stream to WHIP",
             "type": "debugpy",
             "request": "launch",
             "program": "stream_whip.py",
