@@ -13,7 +13,7 @@ LOGGER = logging.getLogger("rtc_stream.nodes")
 
 class RTCStreamFrameInput:
     """
-    ComfyUI node that enqueues frame tensors into the streaming pipeline.
+    ComfyUI output node that enqueues frame tensors into the streaming pipeline.
     """
 
     @classmethod
@@ -36,8 +36,9 @@ class RTCStreamFrameInput:
             },
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("image",)
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    OUTPUT_NODE = True
     FUNCTION = "push_frame"
     CATEGORY = "RTC Stream"
 
@@ -69,7 +70,7 @@ class RTCStreamFrameInput:
                 LOGGER.debug("RTC stream uploaded frame via HTTP uplink (seed=%s)", actual_seed)
             else:
                 LOGGER.warning("Failed to deliver frame via HTTP uplink")
-        return (image,)
+        return ()
 
 
 NODE_CLASS_MAPPINGS = {
@@ -77,6 +78,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RTCStreamFrameInput": "RTC Stream Frame Input",
+    "RTCStreamFrameInput": "RTC Stream Frame Output",
 }
 
