@@ -95,6 +95,7 @@ async def push_frame(payload: FramePayload):
         raise HTTPException(status_code=500, detail="Controller unavailable")
     frame = decode_frame(payload.frame_b64)
     controller.enqueue_frame(frame)
+    LOGGER.info("HTTP /frames accepted frame (depth=%s)", FRAME_BRIDGE.depth())
     return JSONResponse({"accepted": True, "queue_depth": FRAME_BRIDGE.depth()})
 
 

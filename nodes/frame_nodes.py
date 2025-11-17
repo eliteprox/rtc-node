@@ -4,7 +4,8 @@ from typing import Any, Dict
 
 import torch
 
-from rtc_stream.frame_bridge import enqueue_tensor_frame, has_loop, queue_depth
+from rtc_stream.frame_bridge import has_loop, queue_depth
+from rtc_stream.frame_uplink import deliver_tensor_frame
 
 
 LOGGER = logging.getLogger("rtc_stream.nodes")
@@ -56,13 +57,18 @@ class RTCStreamFrameInput:
     def push_frame(self, image: torch.Tensor, enabled: bool = True, seed: int = -1):
         actual_seed = self._resolve_seed(seed)
         if enabled:
-            enqueue_tensor_frame(image)
-            LOGGER.debug(
-                "RTC stream enqueued frame (loop_ready=%s depth=%s seed=%s)",
-                has_loop(),
-                queue_depth(),
-                actual_seed,
-            )
+            success, mode = deliver_tensor_frame(image)
+            if success and mode == "local":
+                LOGGER.debug(
+                    "RTC stream enqueued frame (loop_ready=%s depth=%s seed=%s)",
+                    has_loop(),
+                    queue_depth(),
+                    actual_seed,
+                )
+            elif success:
+                LOGGER.debug("RTC stream uploaded frame via HTTP uplink (seed=%s)", actual_seed)
+            else:
+                LOGGER.warning("Failed to deliver frame via HTTP uplink")
         return (image,)
 
 
