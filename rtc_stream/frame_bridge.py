@@ -107,25 +107,46 @@ def enqueue_array_frame(frame: np.ndarray) -> None:
     FRAME_BRIDGE.enqueue(frame)
 
 
+def tensor_to_uint8_frame(tensor: torch.Tensor) -> np.ndarray:
+    """
+    Normalize a ComfyUI tensor (B,H,W,C) or (B,C,H,W) into an RGB uint8 numpy array.
+    """
+
+    if tensor is None:
+        raise ValueError("tensor is None")
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError("tensor must be a torch.Tensor")
+
+    data = tensor
+    if data.dim() == 4:
+        data = data[0]
+    if data.dim() == 3 and data.shape[0] in (1, 3, 4):
+        # assume CHW/CAHW and convert to HWC
+        data = data.permute(1, 2, 0)
+
+    np_frame = data.detach().cpu().numpy()
+    if np_frame.ndim != 3:
+        raise ValueError("tensor must resolve to an HxWxC array")
+
+    channels = np_frame.shape[2]
+    if channels == 1:
+        np_frame = np.repeat(np_frame, 3, axis=2)
+    elif channels > 3:
+        np_frame = np_frame[:, :, :3]
+
+    if np_frame.dtype.kind == "f" and np_frame.max() <= 1.0:
+        np_frame = np_frame * 255.0
+
+    np_frame = np.clip(np_frame, 0, 255).astype(np.uint8)
+    return np_frame
+
+
 def enqueue_tensor_frame(tensor: torch.Tensor) -> None:
     """
     Convert a ComfyUI tensor (B,H,W,C) in float range 0-1 into uint8 array.
     """
 
-    if tensor is None:
-        raise ValueError("tensor is None")
-    data = tensor
-    if data.dim() == 4:
-        data = data[0]
-    if data.dim() == 3 and data.shape[0] in (1, 3):
-        # assume CHW
-        data = data.permute(1, 2, 0)
-    np_frame = (
-        data.detach().cpu().numpy()
-    )
-    if np_frame.max() <= 1.0:
-        np_frame = np_frame * 255.0
-    enqueue_array_frame(np_frame.astype(np.uint8))
+    enqueue_array_frame(tensor_to_uint8_frame(tensor))
 
 
 def enqueue_file_frame(image_path: Union[str, Path]) -> None:

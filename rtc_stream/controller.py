@@ -62,6 +62,8 @@ class FrameQueueTrack(VideoStreamTrack):
         self._dummy_frame = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
         self.folder_source = FolderFrameSource()
         self._last_sent = 0.0
+        self._last_source = "none"
+        self._last_live_frame: Optional[np.ndarray] = None
         if fallback_video:
             import av  # local import to avoid circular dependency
 
@@ -76,10 +78,22 @@ class FrameQueueTrack(VideoStreamTrack):
             self.stream = None
             self._frame_iter = None
 
+    def _log_source_change(self, source: str) -> None:
+        if source != self._last_source:
+            LOGGER.info("FrameQueueTrack source -> %s", source)
+            self._last_source = source
+
     async def recv(self) -> VideoFrame:
         await asyncio.sleep(self._frame_interval)
-        image = self.bridge.try_get_nowait()
-        if image is None and self.container is not None:
+        frame = self.bridge.try_get_nowait()
+        if frame is not None:
+            self._last_live_frame = frame.copy()
+            image = frame[:, :, ::-1]
+            source = "queue"
+        elif self._last_live_frame is not None:
+            image = self._last_live_frame[:, :, ::-1]
+            source = "queue_cached"
+        elif self.container is not None:
             try:
                 decoded = next(self._frame_iter)
             except StopIteration:
@@ -87,14 +101,17 @@ class FrameQueueTrack(VideoStreamTrack):
                 self._frame_iter = self.container.decode(self.stream)
                 decoded = next(self._frame_iter)
             image = decoded.to_ndarray(format="bgr24")
-        elif image is None:
+            source = "fallback_video"
+        else:
             folder_frame = self.folder_source.next_frame()
             if folder_frame is not None:
                 image = folder_frame[:, :, ::-1]
+                source = "fallback_folder"
             else:
                 image = self._dummy_frame[:, :, ::-1]
-        else:
-            image = image[:, :, ::-1]
+                source = "fallback_dummy"
+
+        self._log_source_change(source)
 
         frame = VideoFrame.from_ndarray(image, format="bgr24")
         frame = frame.reformat(
