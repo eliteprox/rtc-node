@@ -127,9 +127,7 @@
         { "name": "image", "type": "IMAGE", "link": 9 },
         { "name": "enabled", "type": "BOOLEAN", "value": true }
       ],
-      "outputs": [
-        { "name": "IMAGE", "type": "IMAGE", "links": [10] }
-      ]
+      "outputs": []
     },
     {
       "id": 8,
@@ -154,7 +152,7 @@
     [7, 5, 0, 6, 1],
     [8, 1, 2, 6, 0],
     [9, 6, 0, 7, 0],
-    [10, 7, 0, 8, 0]
+    [10, 6, 0, 8, 0]
   ],
   "groups": []
 }
