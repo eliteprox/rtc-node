@@ -59,6 +59,7 @@ class FrameQueueTrack(VideoStreamTrack):
         self._frame_interval = 1.0 / frame_rate
         self._pts = 0
         self._time_base = Fraction(1, int(round(frame_rate)))
+        # Empty black fallback frame (RGB [0,0,0]) - used when no other frame source is available
         self._dummy_frame = np.zeros((self.frame_height, self.frame_width, 3), dtype=np.uint8)
         self.folder_source = FolderFrameSource()
         self._last_sent = 0.0

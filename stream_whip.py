@@ -139,6 +139,7 @@ class VideoSourceTrack(VideoStreamTrack):
             frame = frame.reformat(format="yuv420p")
             pts = frame.pts
         else:
+            # Empty black fallback frame (RGB [0,0,0]) when no video source is available
             image = np.zeros((720, 1280, 3), dtype=np.uint8)
             frame = VideoFrame.from_ndarray(image, format="bgr24")
             frame = frame.reformat(format="yuv420p")
