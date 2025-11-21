@@ -9,3 +9,6 @@ pillow>=10.3.0
 python-dotenv>=1.0.1
 comfyui-frontend-package>=1.32.5
 
+torch
+torchvision
+torchaudio

@@ -147,3 +147,79 @@ def poll_stream_status(
 
     return last_payload
 
+
+def update_stream(
+    api_url: str,
+    api_key: str,
+    stream_id: str,
+    pipeline_config: Dict[str, Any],
+    session: Optional[requests.Session] = None,
+) -> Dict[str, Any]:
+    """
+    Update pipeline parameters for an existing stream.
+    Forwards the update to Daydream API's PATCH /v1/streams/{id} endpoint.
+    """
+    if not isinstance(pipeline_config, dict):
+        raise ValueError("pipeline_config must be dict")
+
+    if "params" in pipeline_config:
+        pipeline_name = pipeline_config.get("pipeline", "streamdiffusion")
+        params_section = pipeline_config.get("params")
+    else:
+        pipeline_name = "streamdiffusion"
+        params_section = pipeline_config
+
+    if not isinstance(params_section, dict):
+        raise ValueError("pipeline_config params must be dict")
+
+    params_payload = json.loads(json.dumps(params_section))
+    update_request = {"pipeline": pipeline_name, "params": params_payload}
+
+    # Normalize the base URL similar to start_stream
+    stream_endpoint = "v1/streams"
+    normalized_api_url = api_url.rstrip("/")
+    
+    # Remove the endpoint if it's already in the URL
+    if normalized_api_url.endswith("/" + stream_endpoint):
+        base_url = normalized_api_url.rsplit("/" + stream_endpoint, 1)[0]
+    elif normalized_api_url.endswith(stream_endpoint):
+        base_url = normalized_api_url.rsplit(stream_endpoint, 1)[0].rstrip("/")
+    else:
+        base_url = normalized_api_url
+    
+    # Construct the update URL
+    update_url = urljoin(base_url + "/", f"{stream_endpoint}/{stream_id}")
+    
+    LOGGER.info("Updating stream at %s", update_url)
+    LOGGER.debug("Update payload: %s", json.dumps(update_request))
+
+    sess = session or requests.Session()
+    response = sess.patch(
+        update_url,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Accept-Encoding": "identity",
+        },
+        json=update_request,
+        timeout=30,
+    )
+
+    if response.status_code not in (200, 201):
+        error_msg = f"Failed to update stream {response.status_code}: {response.text}"
+        LOGGER.error("Update request failed - URL: %s, Status: %s, Response: %s", 
+                     update_url, response.status_code, response.text)
+        
+        # Check if it's a 405 Method Not Allowed
+        if response.status_code == 405:
+            LOGGER.warning(
+                "PATCH method not allowed. The Daydream API endpoint may not support "
+                "runtime updates yet. Consider stopping and restarting the stream with new parameters."
+            )
+        
+        raise RuntimeError(error_msg)
+
+    stream_data = response.json()
+    LOGGER.info("Stream %s updated successfully", stream_id)
+    return stream_data
+

@@ -9,10 +9,10 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import requests
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from av import VideoFrame
 
-from .daydream import StreamInfo, poll_stream_status, resolve_credentials, start_stream
+from .daydream import StreamInfo, poll_stream_status, resolve_credentials, start_stream, update_stream
 from .frame_bridge import FRAME_BRIDGE, FolderFrameSource
 
 
@@ -141,6 +141,17 @@ class StreamController:
             return override
         with open(self.config.pipeline_path, "r", encoding="utf-8") as fp:
             return json.load(fp)
+
+    def cache_pipeline_config(self, pipeline_config: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(pipeline_config, dict):
+            raise ValueError("pipeline_config must be a dict")
+        payload = dict(pipeline_config)
+        path = self.config.pipeline_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fp:
+            json.dump(payload, fp, indent=2)
+        LOGGER.info("Cached pipeline config at %s", path)
+        return payload
 
     def _set_phase_status(self, phase: str, detail: str = "", extra: Optional[Dict[str, Any]] = None) -> None:
         payload = {
@@ -287,9 +298,50 @@ class StreamController:
             except (TypeError, ValueError):
                 LOGGER.warning("Invalid frame_height provided: %s", frame_height)
 
+    async def update_pipeline(self, pipeline_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Update pipeline configuration for the running stream.
+        This forwards the update to Daydream API without restarting the stream.
+        """
+        async with self._lock:
+            if not self.state.running or not self.state.info:
+                raise ValueError("No active stream to update")
+
+            api_url, api_key = resolve_credentials(self.config.api_url, self.config.api_key)
+            stream_id = self.state.info.stream_id
+
+            loop = asyncio.get_running_loop()
+
+            result = await loop.run_in_executor(
+                None,
+                lambda: update_stream(
+                    api_url=api_url,
+                    api_key=api_key,
+                    stream_id=stream_id,
+                    pipeline_config=pipeline_config,
+                ),
+            )
+
+            self._set_phase_status(
+                "PIPELINE_UPDATED",
+                detail="Pipeline parameters updated",
+                extra={"stream_id": stream_id},
+            )
+
+            return result
+
     async def _run_session(self, info: StreamInfo) -> None:
         LOGGER.info("Initiating RTC connection to WHIP URL: %s", info.whip_url)
-        pc = RTCPeerConnection()
+        config = RTCConfiguration(
+            iceServers=[
+                RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+                RTCIceServer(urls=["stun:stun.cloudflare.com:3478"]),
+                RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
+                RTCIceServer(urls=["stun:stun2.l.google.com:19302"]),
+                RTCIceServer(urls=["stun:stun3.l.google.com:19302"]),
+            ]
+        )
+        pc = RTCPeerConnection(configuration=config)
         self.pc = pc
         track = FrameQueueTrack(
             FRAME_BRIDGE,

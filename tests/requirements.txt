@@ -1,0 +1,15 @@
+aiohttp
+pytest
+pytest-mock
+pytest-asyncio
+pytest-cov
+pytest-timeout
+pytest-xdist
+pytest-sugar
+pytest-env
+pytest-randomly
+pytest-timeout
+pytest-xdist
+pytest-sugar
+pytest-env
+pytest-randomly

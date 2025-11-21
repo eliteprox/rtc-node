@@ -11,7 +11,7 @@ from urllib.parse import urljoin
 import av
 import numpy as np
 import requests
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from av import VideoFrame
 
 
@@ -157,7 +157,16 @@ async def stream_to_whip(
     video_path: Optional[str],
     max_duration: int = 3600,
 ) -> None:
-    pc = RTCPeerConnection()
+    config = RTCConfiguration(
+        iceServers=[
+            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urls=["stun:stun.cloudflare.com:3478"]),
+            RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
+            RTCIceServer(urls=["stun:stun2.l.google.com:19302"]),
+            RTCIceServer(urls=["stun:stun3.l.google.com:19302"]),
+        ]
+    )
+    pc = RTCPeerConnection(configuration=config)
     track = VideoSourceTrack(video_path)
     pc.addTrack(track)
 

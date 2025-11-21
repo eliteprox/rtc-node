@@ -1,4 +1,5 @@
 import argparse
+import asyncio
 import base64
 import io
 import logging
@@ -18,12 +19,15 @@ if str(ROOT_DIR) not in sys.path:
 from rtc_stream.config_store import load_runtime_config, save_runtime_config
 from rtc_stream.controller import ControllerConfig, StreamController
 from rtc_stream.frame_bridge import FRAME_BRIDGE
+from rtc_stream.whep_controller import WhepController, WhepControllerConfig
+from rtc_stream.whep_frame_bridge import WHEP_FRAME_BRIDGE
 
 
 LOGGER = logging.getLogger("rtc_stream.api")
 
 runtime_config = load_runtime_config()
 controller: Optional[StreamController] = None
+whep_controller: Optional[WhepController] = None
 
 router = APIRouter()
 
@@ -40,6 +44,9 @@ def _apply_runtime_config_to_controller() -> None:
 class StartRequest(BaseModel):
     stream_name: str = ""
     pipeline_config: Optional[Dict[str, Any]] = None
+    frame_rate: Optional[int] = None
+    frame_width: Optional[int] = None
+    frame_height: Optional[int] = None
 
 
 class FramePayload(BaseModel):
@@ -50,6 +57,18 @@ class RuntimeConfigPayload(BaseModel):
     frame_rate: int
     frame_width: int
     frame_height: int
+
+
+class WhepConnectPayload(BaseModel):
+    whep_url: str
+
+
+class PipelineCachePayload(BaseModel):
+    pipeline_config: Dict[str, Any]
+
+
+class PipelineUpdatePayload(BaseModel):
+    pipeline_config: Dict[str, Any]
 
 
 @router.get("/healthz")
@@ -66,6 +85,18 @@ async def start_stream(req: StartRequest):
     if controller is None:
         raise HTTPException(status_code=500, detail="Controller unavailable")
     _apply_runtime_config_to_controller()
+    
+    # Apply stream settings if provided
+    settings = {}
+    if req.frame_rate is not None:
+        settings["frame_rate"] = req.frame_rate
+    if req.frame_width is not None:
+        settings["frame_width"] = req.frame_width
+    if req.frame_height is not None:
+        settings["frame_height"] = req.frame_height
+    if settings:
+        controller.update_stream_settings(settings)
+    
     status = await controller.start(
         stream_name=req.stream_name,
         pipeline_override=req.pipeline_config,
@@ -121,12 +152,96 @@ async def update_runtime_config(payload: RuntimeConfigPayload):
     return {**runtime_config, "locked": False}
 
 
+@router.post("/pipeline/cache")
+async def cache_pipeline_config(payload: PipelineCachePayload):
+    if controller is None:
+        raise HTTPException(status_code=500, detail="Controller unavailable")
+    loop = asyncio.get_running_loop()
+    normalized = await loop.run_in_executor(
+        None,
+        controller.cache_pipeline_config,
+        payload.pipeline_config,
+    )
+    return {
+        "cached": True,
+        "pipeline": normalized.get("pipeline", ""),
+        "path": str(controller.config.pipeline_path),
+    }
+
+
+@router.patch("/pipeline")
+async def update_pipeline(payload: PipelineUpdatePayload):
+    """
+    Update pipeline configuration for the running stream.
+    Forwards the update to Daydream API without restarting the stream.
+    """
+    if controller is None:
+        raise HTTPException(status_code=500, detail="Controller unavailable")
+
+    if not controller.state.running:
+        raise HTTPException(status_code=409, detail="No active stream to update")
+
+    try:
+        result = await controller.update_pipeline(payload.pipeline_config)
+        return {
+            "updated": True,
+            "stream_id": controller.state.info.stream_id if controller.state.info else "",
+            "pipeline": result.get("pipeline", ""),
+            "params": result.get("params", {}),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/whep/status")
+async def get_whep_status():
+    if whep_controller is None:
+        raise HTTPException(status_code=500, detail="WHEP controller unavailable")
+    status = whep_controller.status()
+    bridge_stats = await WHEP_FRAME_BRIDGE.stats()
+    return {**status, "bridge_stats": bridge_stats}
+
+
+@router.post("/whep/connect")
+async def connect_whep(payload: WhepConnectPayload):
+    if whep_controller is None:
+        raise HTTPException(status_code=500, detail="WHEP controller unavailable")
+    status = await whep_controller.connect(payload.whep_url)
+    return status
+
+
+@router.post("/whep/disconnect")
+async def disconnect_whep():
+    if whep_controller is None:
+        raise HTTPException(status_code=500, detail="WHEP controller unavailable")
+    status = await whep_controller.disconnect()
+    return status
+
+
+@router.get("/whep/frame")
+async def fetch_whep_frame():
+    if whep_controller is None:
+        raise HTTPException(status_code=500, detail="WHEP controller unavailable")
+    frame, metadata, has_frame = await WHEP_FRAME_BRIDGE.get_latest_frame_or_blank()
+    encoded = encode_frame(frame)
+    return {"frame_b64": encoded, "has_frame": has_frame, "metadata": metadata, "status": whep_controller.status()}
+
+
 def decode_frame(blob_b64: str) -> np.ndarray:
     from PIL import Image
 
     decoded = base64.b64decode(blob_b64)
     image = Image.open(io.BytesIO(decoded)).convert("RGB")
     return np.array(image)
+
+
+def encode_frame(frame: np.ndarray) -> str:
+    from PIL import Image
+
+    with io.BytesIO() as buffer:
+        image = Image.fromarray(frame.astype(np.uint8))
+        image.save(buffer, format="PNG")
+        return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def normalize_runtime_config(payload: RuntimeConfigPayload) -> Dict[str, int]:
@@ -157,9 +272,18 @@ def init_controller(api_url: str, api_key: str, pipeline_config: str, video_file
     return StreamController(config)
 
 
+def init_whep_controller() -> WhepController:
+    config = WhepControllerConfig(
+        frame_width=runtime_config["frame_width"],
+        frame_height=runtime_config["frame_height"],
+    )
+    return WhepController(config)
+
+
 def bootstrap_controller(api_url: str, api_key: str, pipeline_config: str, video_file: str = "") -> None:
-    global controller
+    global controller, whep_controller
     controller = init_controller(api_url, api_key, pipeline_config, video_file)
+    whep_controller = init_whep_controller()
 
 
 def parse_args() -> argparse.Namespace:
@@ -170,6 +294,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-url", default="")
     parser.add_argument("--api-key", default="")
     parser.add_argument("--video-file", default="")
+    parser.add_argument(
+        "--whep-url",
+        default="",
+        help="Optional WHEP endpoint to subscribe to immediately after startup",
+    )
     parser.add_argument("--log-level", default="info")
     return parser.parse_args()
 
@@ -192,6 +321,20 @@ def main():
         allow_headers=["*"],
     )
     app.include_router(router)
+
+    initial_whep_url = args.whep_url.strip()
+
+    if initial_whep_url:
+        @app.on_event("startup")
+        async def auto_start_whep() -> None:
+            if whep_controller is None:
+                LOGGER.error("WHEP controller unavailable; cannot auto-connect to %s", initial_whep_url)
+                return
+            try:
+                await whep_controller.connect(initial_whep_url)
+                LOGGER.info("Auto-connected WHEP subscriber to %s", initial_whep_url)
+            except Exception as exc:  # pragma: no cover - network interactions
+                LOGGER.error("Failed to auto-connect WHEP subscriber: %s", exc)
 
     uvicorn.run(
         app,

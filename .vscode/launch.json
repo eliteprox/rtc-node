@@ -18,6 +18,31 @@
                 "--api-url", "https://api.daydream.live/v1/streams",
                 "--api-key", ""
             ],
+            "env": {
+                "DAYDREAM_API_URL": "https://api.daydream.live/v1/streams",
+                "DAYDREAM_API_KEY": ""
+            },
+            "python": "${command:python.interpreterPath}"
+        },
+        {
+            "name": "StreamProcessor API Server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/server/app.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "args": [
+                "--host", "127.0.0.1",
+                "--port", "8896",
+                "--pipeline-config", "./pipeline_config.json",
+                "--video-file", "${workspaceFolder}/test.mp4",
+                "--log-level", "debug"
+            ],
+            "env": {
+                "DAYDREAM_API_URL": "https://api.daydream.live/v1/streams",
+                "DAYDREAM_API_KEY": ""
+            },
+            "justMyCode": false,
             "python": "${command:python.interpreterPath}"
         }
     ]

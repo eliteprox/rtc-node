@@ -2,7 +2,7 @@
     "pipeline": "streamdiffusion",
     "params": {
         "model_id": "stabilityai/sd-turbo",
-        "prompt": "A beautiful landsape",
+        "prompt": "A beautiful landsape from the json file ",
         "prompt_interpolation_method": "linear",
         "normalize_prompt_weights": true,
         "normalize_seed_weights": true,
