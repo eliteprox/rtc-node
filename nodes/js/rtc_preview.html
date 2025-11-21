@@ -246,7 +246,7 @@
   </div>
 
   <script>
-    (() => {
+    (async () => {
       const queryParams = new URLSearchParams(window.location.search);
 
       const normalizeBase = (value) => (value || "").trim().replace(/\/+$/, "");
@@ -255,7 +255,7 @@
       const fallbackBase = window.location.protocol.startsWith("http")
         ? `${window.location.protocol}//${window.location.hostname || "127.0.0.1"}:8895`
         : "http://127.0.0.1:8895";
-      const baseUrl = queryBase || storedBase || fallbackBase;
+      let baseUrl = queryBase || storedBase || fallbackBase;
       window.localStorage.setItem("rtcPreview.localBase", baseUrl);
 
       const ICE_SERVERS = [
@@ -285,6 +285,43 @@
       let connecting = false;
       let currentWhepUrl = "";
       let statusTimer = null;
+      let syncBasePromise = null;
+
+      async function syncLocalApiBase() {
+        if (syncBasePromise) {
+          return syncBasePromise;
+        }
+        syncBasePromise = (async () => {
+          const response = await fetch("/rtc/control", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "start" }),
+            cache: "no-store",
+          });
+          if (!response.ok) {
+            throw new Error(`RTC control HTTP ${response.status}`);
+          }
+          const payload = await response.json();
+          const status = payload?.status || {};
+          if (!status.running) {
+            const message = payload?.error || "Local API server unavailable";
+            throw new Error(message);
+          }
+          const host = status.host || "127.0.0.1";
+          const port = status.port ?? 8895;
+          const nextBase = `http://${host}:${port}`;
+          if (baseUrl !== nextBase) {
+            baseUrl = nextBase;
+            window.localStorage.setItem("rtcPreview.localBase", baseUrl);
+          }
+          return status;
+        })();
+        try {
+          return await syncBasePromise;
+        } finally {
+          syncBasePromise = null;
+        }
+      }
 
       function updateStreamButton(running, busy = false) {
         isStreamRunning = running;
@@ -472,6 +509,8 @@
         try {
           updateStreamButton(false, true);
           setConnectionState("connecting", "starting stream");
+
+          await syncLocalApiBase();
           
           const payload = {
             stream_name: "comfyui-livestream",
@@ -631,6 +670,11 @@
       }
 
       // Initialize: fetch status and auto-connect if stream is running
+      try {
+        await syncLocalApiBase();
+      } catch (error) {
+        console.warn("RTC preview unable to sync local API base:", error);
+      }
       refreshStatus({ autoConnect: true }).catch(() => {});
       startStatusPolling();
       wireEvents();
