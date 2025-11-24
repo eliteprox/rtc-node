@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - fallback if dependency missing
         return False
 
 from .settings_storage import load_settings
+from rtc_stream.credentials import resolve_credentials
 
 
 LOGGER = logging.getLogger("rtc_stream.api_server_manager")
@@ -226,6 +227,14 @@ def ensure_server_running(host_override: Optional[str] = None, port_override: Op
         base_port = int(port_override or settings["port"])
         pipeline_config = Path(settings["pipeline_config"]).resolve()
         video_file = settings.get("video_file", "")
+        try:
+            api_url, api_key = resolve_credentials()
+        except ValueError as exc:
+            LOGGER.error("Unable to resolve Daydream credentials: %s", exc)
+            raise RuntimeError(
+                "Daydream credentials missing. Set DAYDREAM_API_KEY (and optional DAYDREAM_API_URL) "
+                "in your environment or .env file before starting the RTC server."
+            ) from exc
 
         if not pipeline_config.exists():
             LOGGER.warning("Pipeline config %s not found", pipeline_config)
@@ -250,9 +259,9 @@ def ensure_server_running(host_override: Optional[str] = None, port_override: Op
                 "--pipeline-config",
                 str(pipeline_config),
                 "--api-url",
-                os.environ.get("DAYDREAM_API_URL", "https://api.daydream.live"),
+                api_url,
                 "--api-key",
-                os.environ.get("DAYDREAM_API_KEY", ""),
+                api_key,
             ]
             if video_file:
                 cmd.extend(["--video-file", video_file])

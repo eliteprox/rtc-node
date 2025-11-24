@@ -2,6 +2,18 @@
 
 ## Launching for Local Testing
 
+Before launching anything, copy the sample environment and set your Daydream credentials:
+
+```powershell
+Copy-Item .env.example .env -Force
+notepad .env  # update DAYDREAM_API_KEY
+```
+
+```bash
+cp .env.example .env
+${EDITOR:-nano} .env   # update DAYDREAM_API_KEY
+```
+
 Use the `StreamProcessor API Server` configuration in `.vscode/launch.json` to start the FastAPI service without ComfyUI. It already points at your default `pipeline_config.json`, the fallback `test.mp4`, and exposes the Daydream credentials via environment variables, so hitting Debug ▶️ will:
 
 - initialize `StreamController` and `WhepController`

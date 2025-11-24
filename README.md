@@ -56,23 +56,37 @@ After installation, you should see:
 
 ### 1. Set Up Daydream Credentials
 
-You'll need a Daydream API key. Set it as an environment variable:
+Copy the sample env file and fill in your API key:
 
 **Windows (PowerShell)**:
 ```powershell
-$env:DAYDREAM_API_KEY="your_api_key_here"
+Copy-Item .env.example .env -Force
+notepad .env  # set DAYDREAM_API_KEY (and optional DAYDREAM_API_URL)
 ```
 
 **Linux/Mac**:
 ```bash
+cp .env.example .env
+${EDITOR:-nano} .env   # set DAYDREAM_API_KEY (and optional DAYDREAM_API_URL)
+```
+
+If you prefer to export variables per-shell instead of using `.env`, set them manually:
+
+```powershell
+$env:DAYDREAM_API_KEY="your_api_key_here"
+```
+
+```bash
 export DAYDREAM_API_KEY="your_api_key_here"
 ```
 
-Or create a `.env` file in the `rtc-node` directory:
-```env
-DAYDREAM_API_URL=https://api.daydream.live/v1/streams
-DAYDREAM_API_KEY=your_api_key_here
-```
+The new `rtc_stream/credentials.py` helper loads `.env` (when python-dotenv is
+installed) and is used everywhere—custom nodes, the FastAPI subprocess, CLI
+tools, and tests—so credentials only have to be defined once. We no longer ship
+placeholder keys: if `DAYDREAM_API_KEY` is missing the RTC nodes will explain
+how to set it. Keeping secrets in environment variables (instead of node inputs)
+prevents them from being serialized into your ComfyUI workflows or checked into
+git history.
 
 ### 2. Add Nodes to Your Workflow
 

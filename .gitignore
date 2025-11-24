@@ -10,4 +10,8 @@ __pycache__
 .pytest_cache
 .ruff_cache
 .mypy_cache
+
+
 *.mp4
+settings/*.log
+settings/local_api_server_state.json

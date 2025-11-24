@@ -1,12 +1,13 @@
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 from urllib.parse import urljoin
 
 import requests
+
+from .credentials import resolve_credentials
 
 
 LOGGER = logging.getLogger("rtc_stream.daydream")
@@ -19,18 +20,6 @@ class StreamInfo:
     stream_id: str
     whep_url: str = ""
     stream_name: str = ""
-
-
-def resolve_credentials(api_url: str, api_key: str) -> Tuple[str, str]:
-    """
-    Resolve API credentials using explicit parameters or environment variables.
-    """
-
-    resolved_url = api_url.strip() or os.environ.get("DAYDREAM_API_URL", "").strip()
-    resolved_key = api_key.strip() or os.environ.get("DAYDREAM_API_KEY", "").strip()
-    if not resolved_url or not resolved_key:
-        raise ValueError("Daydream API URL or key missing")
-    return resolved_url, resolved_key
 
 
 def start_stream(

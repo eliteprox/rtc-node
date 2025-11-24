@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import uuid
 from fractions import Fraction
 from typing import Any, Dict, Optional, Tuple
@@ -14,17 +13,10 @@ import requests
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from av import VideoFrame
 
+from rtc_stream.credentials import resolve_credentials
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger("stream_whip")
-
-
-def get_credentials() -> Tuple[str, str]:
-    api_url = os.environ.get("DAYDREAM_API_URL", "").strip()
-    api_key = os.environ.get("DAYDREAM_API_KEY", "").strip()
-    if not api_url or not api_key:
-        raise ValueError("DAYDREAM_API_URL and DAYDREAM_API_KEY must be set in the environment")
-    return api_url, api_key
 
 
 def start_stream(
@@ -38,12 +30,7 @@ def start_stream(
     Create a stream via the Daydream API and return the WHIP URL with playback identifiers.
     """
 
-    if not api_key.strip():
-        api_url, api_key = get_credentials()
-        LOGGER.info("Loaded API credentials from environment")
-
-    if not api_url.strip():
-        raise ValueError("api_url must be provided either via argument or environment")
+    api_url, api_key = resolve_credentials(api_url, api_key)
 
     if not stream_name:
         stream_name = f"comfyui-stream-{uuid.uuid4().hex[:8]}"
@@ -196,8 +183,18 @@ def load_pipeline_config(path: str) -> Dict[str, Any]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Stream video to WHIP ingest endpoint.")
-    parser.add_argument("--api-url", required=True, default="", help="API URL to use for the Daydream API")
-    parser.add_argument("--api-key", required=True, default="", help="API key to use for the Daydream API")
+    parser.add_argument(
+        "--api-url",
+        required=False,
+        default="",
+        help="API URL to use for the Daydream API (defaults to DAYDREAM_API_URL or https://api.daydream.live)",
+    )
+    parser.add_argument(
+        "--api-key",
+        required=False,
+        default="",
+        help="API key to use for the Daydream API (defaults to DAYDREAM_API_KEY)",
+    )
     parser.add_argument("--pipeline-config", required=True)
     parser.add_argument("--video-file", required=False)
     parser.add_argument("--stream-name", required=False, default="comfyworkflow")
