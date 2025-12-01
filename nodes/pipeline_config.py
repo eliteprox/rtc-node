@@ -27,6 +27,12 @@ CONTROLNET_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "SD2.1 OpenPose",
         "preprocessors": ("pose_tensorrt",),
         "default_preprocessor": "pose_tensorrt",
+        "preprocessor_defaults": {
+            "pose_tensorrt": {
+                "conditioning_scale": 0.711,
+                "preprocessor_params": {},
+            }
+        },
         "pipelines": {
             "streamdiffusion": ("stabilityai/sd-turbo",),
         },
@@ -35,6 +41,12 @@ CONTROLNET_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "SD2.1 HED",
         "preprocessors": ("soft_edge",),
         "default_preprocessor": "soft_edge",
+        "preprocessor_defaults": {
+            "soft_edge": {
+                "conditioning_scale": 0.2,
+                "preprocessor_params": {},
+            }
+        },
         "pipelines": {
             "streamdiffusion": ("stabilityai/sd-turbo",),
         },
@@ -43,6 +55,15 @@ CONTROLNET_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "SD2.1 Canny",
         "preprocessors": ("canny",),
         "default_preprocessor": "canny",
+        "preprocessor_defaults": {
+            "canny": {
+                "conditioning_scale": 0.2,
+                "preprocessor_params": {
+                    "low_threshold": 100,
+                    "high_threshold": 200,
+                },
+            }
+        },
         "pipelines": {
             "streamdiffusion": ("stabilityai/sd-turbo",),
         },
@@ -51,6 +72,12 @@ CONTROLNET_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "SD2.1 Depth",
         "preprocessors": ("depth_tensorrt",),
         "default_preprocessor": "depth_tensorrt",
+        "preprocessor_defaults": {
+            "depth_tensorrt": {
+                "conditioning_scale": 0.5,
+                "preprocessor_params": {},
+            }
+        },
         "pipelines": {
             "streamdiffusion": ("stabilityai/sd-turbo",),
         },
@@ -59,6 +86,12 @@ CONTROLNET_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "SD2.1 Color",
         "preprocessors": ("passthrough",),
         "default_preprocessor": "passthrough",
+        "preprocessor_defaults": {
+            "passthrough": {
+                "conditioning_scale": 0.2,
+                "preprocessor_params": {},
+            }
+        },
         "pipelines": {
             "streamdiffusion": ("stabilityai/sd-turbo",),
         },

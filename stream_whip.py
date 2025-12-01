@@ -2,10 +2,8 @@ import argparse
 import asyncio
 import json
 import logging
-import uuid
 from fractions import Fraction
-from typing import Any, Dict, Optional, Tuple
-from urllib.parse import urljoin
+from typing import Any, Dict, Optional
 
 import av
 import numpy as np
@@ -14,78 +12,10 @@ from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSession
 from av import VideoFrame
 
 from rtc_stream.credentials import resolve_credentials
+from rtc_stream.daydream import StreamInfo, get_stream_info, start_stream as create_stream
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 LOGGER = logging.getLogger("stream_whip")
-
-
-def start_stream(
-    api_url: str,
-    api_key: str,
-    pipeline_config: Dict[str, Any],
-    stream_name: str = "",
-    max_duration: int = 3600,
-) -> Tuple[str, str, str]:
-    """
-    Create a stream via the Daydream API and return the WHIP URL with playback identifiers.
-    """
-
-    api_url, api_key = resolve_credentials(api_url, api_key)
-
-    if not stream_name:
-        stream_name = f"comfyui-stream-{uuid.uuid4().hex[:8]}"
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-        "Accept-Encoding": "identity",
-    }
-
-    if not isinstance(pipeline_config, dict):
-        raise ValueError("pipeline_config must be a dictionary payload")
-
-    if "params" in pipeline_config:
-        pipeline_name = pipeline_config.get("pipeline", "streamdiffusion")
-        params_section = pipeline_config.get("params")
-    else:
-        pipeline_name = "streamdiffusion"
-        params_section = pipeline_config
-
-    if not isinstance(params_section, dict):
-        raise ValueError("pipeline_config params must be a dictionary")
-
-    try:
-        params_payload = json.loads(json.dumps(params_section))
-    except TypeError as exc:
-        raise ValueError(f"Pipeline params contain non-serialisable values: {exc}") from exc
-
-    stream_request = {"pipeline": pipeline_name, "params": params_payload, "name": stream_name}
-    stream_endpoint = "v1/streams"
-    normalized_api_url = api_url.rstrip("/")
-    if normalized_api_url.endswith("/" + stream_endpoint):
-        create_stream_url = api_url
-    else:
-        create_stream_url = urljoin(normalized_api_url + "/", stream_endpoint)
-    LOGGER.info("Creating stream at %s", create_stream_url)
-    LOGGER.debug("Stream payload: %s", json.dumps(stream_request))
-
-    response = requests.post(
-        create_stream_url,
-        headers=headers,
-        json=stream_request,
-        timeout=30,
-    )
-
-    if response.status_code != 201:
-        raise RuntimeError(
-            f"Failed to create stream {response.status_code}: {response.text}"
-        )
-
-    stream_data = response.json()
-    whip_url = stream_data.get("whip_url", "")
-    output_playback_id = stream_data.get("output_playback_id", "")
-    stream_id = stream_data.get("id", "")
-    return whip_url, output_playback_id, stream_id
 
 
 class VideoSourceTrack(VideoStreamTrack):
@@ -195,28 +125,62 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="API key to use for the Daydream API (defaults to DAYDREAM_API_KEY)",
     )
-    parser.add_argument("--pipeline-config", required=True)
+    parser.add_argument(
+        "--pipeline-config",
+        required=False,
+        help="Path to pipeline config JSON (required unless --stream-id is supplied)",
+    )
+    parser.add_argument(
+        "--stream-id",
+        required=False,
+        default=None,
+        help="Existing stream ID to reuse; skip creating a new stream",
+    )
     parser.add_argument("--video-file", required=False)
     parser.add_argument("--stream-name", required=False, default="comfyworkflow")
-    parser.add_argument("--duration", type=int, default=60)
-    return parser.parse_args()
+    parser.add_argument("--duration", type=int, default=60, help="Stream duration in seconds (ignored if --loop is set)")
+    parser.add_argument("--loop", action="store_true", help="Stream video file in continuous loop until interrupted")
+    args = parser.parse_args()
+    if not args.stream_id and not args.pipeline_config:
+        parser.error("Either --pipeline-config or --stream-id must be provided.")
+    return args
 
 
 def main() -> None:
     args = parse_args()
-    pipeline_config = load_pipeline_config(args.pipeline_config)
 
-    whip_url, playback_id, stream_id = start_stream(
-        api_url=args.api_url or "",
-        api_key=args.api_key,
-        pipeline_config=pipeline_config,
-        stream_name=args.stream_name,
-        max_duration=args.duration,
+    api_url, api_key = resolve_credentials(args.api_url or "", args.api_key or "")
+    stream_info: StreamInfo
+
+    if args.stream_id:
+        stream_info = get_stream_info(api_url, api_key, args.stream_id)
+        LOGGER.info("Reusing existing stream %s", stream_info.stream_id)
+    else:
+        assert args.pipeline_config is not None
+        pipeline_config = load_pipeline_config(args.pipeline_config)
+        stream_info = create_stream(
+            api_url=api_url,
+            api_key=api_key,
+            pipeline_config=pipeline_config,
+            stream_name=args.stream_name,
+        )
+
+    LOGGER.info(
+        "Streaming to WHIP URL %s (stream: %s, playback: %s)",
+        stream_info.whip_url,
+        stream_info.stream_id,
+        stream_info.playback_id,
     )
-    LOGGER.info("Streaming to WHIP URL %s (stream: %s, playback: %s)", whip_url, stream_id, playback_id)
 
-    asyncio.run(stream_to_whip(whip_url, args.video_file, max_duration=args.duration))
-    LOGGER.info("Streaming session complete. Playback ID: %s", playback_id)
+    # Use a very large duration if loop is enabled (effectively infinite until Ctrl+C)
+    duration = 999999999 if args.loop else args.duration
+
+    try:
+        asyncio.run(stream_to_whip(stream_info.whip_url, args.video_file, max_duration=duration))
+    except KeyboardInterrupt:
+        LOGGER.info("Stream interrupted by user")
+
+    LOGGER.info("Streaming session complete. Playback ID: %s", stream_info.playback_id)
 
 
 if __name__ == "__main__":

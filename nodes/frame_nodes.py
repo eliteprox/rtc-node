@@ -217,107 +217,6 @@ class RTCStreamFrameOutput:
         return blank.unsqueeze(0)
 
 
-class RTCStreamWHEPPreview:
-    """
-    ComfyUI output node that displays frames from the WHEP subscriber.
-    Works like Preview Image - no outputs, just displays the stream.
-    """
-
-    def __init__(self):
-        self._session = requests.Session()
-
-    @classmethod
-    def INPUT_TYPES(cls) -> Dict[str, Any]:
-        return {
-            "required": {
-                "whep_url": ("STRING", {"default": ""}),
-            },
-            "optional": {
-                "images": ("IMAGE",),
-            },
-        }
-
-    RETURN_TYPES = ()
-    FUNCTION = "preview_stream"
-    CATEGORY = "RTC Stream"
-    OUTPUT_NODE = True
-
-    @classmethod
-    def IS_CHANGED(cls, **kwargs) -> bool:
-        return True
-
-    def preview_stream(self, whep_url: str, images=None):
-        """
-        Connect to WHEP stream and return frames for preview.
-        Accepts optional images input to chain execution order.
-        """
-        base_url = self._resolve_base_url()
-        if not base_url:
-            LOGGER.error("Local RTC API server unavailable for WHEP preview")
-            return {"ui": {"images": []}}
-
-        status = self._get_whep_status(base_url)
-        if status is None:
-            return {"ui": {"images": []}}
-
-        should_connect = not (status.get("connected") or status.get("connecting"))
-        if should_connect:
-            if whep_url:
-                self._connect_whep(base_url, whep_url)
-            else:
-                LOGGER.warning("WHEP preview idle but no whep_url provided")
-
-        frame_payload = self._fetch_frame(base_url)
-        if not frame_payload:
-            return {"ui": {"images": []}}
-
-        frame_b64 = frame_payload.get("frame_b64") or ""
-        if not frame_b64:
-            return {"ui": {"images": []}}
-
-        # Return the frame for ComfyUI's preview system
-        return {"ui": {"images": [{"filename": "whep_frame.png", "subfolder": "", "type": "temp", "data": frame_b64}]}}
-
-    def _resolve_base_url(self) -> Optional[str]:
-        status = server_status()
-        if not status.get("running"):
-            LOGGER.error("Local RTC API server is not running")
-            return None
-        host = status.get("host") or "127.0.0.1"
-        port = status.get("port") or DEFAULT_PORT
-        return f"http://{host}:{port}"
-
-    def _get_whep_status(self, base_url: str) -> Optional[Dict[str, Any]]:
-        try:
-            response = self._session.get(f"{base_url}/whep/status", timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to query WHEP status: %s", exc)
-            return None
-
-    def _connect_whep(self, base_url: str, whep_url: str) -> None:
-        try:
-            response = self._session.post(
-                f"{base_url}/whep/connect",
-                json={"whep_url": whep_url},
-                timeout=5,
-            )
-            response.raise_for_status()
-            LOGGER.info("Requested WHEP subscription for %s", whep_url)
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to request WHEP connection: %s", exc)
-
-    def _fetch_frame(self, base_url: str) -> Optional[Dict[str, Any]]:
-        try:
-            response = self._session.get(f"{base_url}/whep/frame", timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to fetch WHEP frame: %s", exc)
-            return None
-
-
 class RTCStreamStatus:
     """
     ComfyUI node that retrieves stream status from the local API server.
@@ -910,7 +809,6 @@ class StartRTCStream:
 NODE_CLASS_MAPPINGS = {
     "RTCStreamFrameInput": RTCStreamFrameInput,
     "RTCStreamFrameOutput": RTCStreamFrameOutput,
-    "RTCStreamWHEPPreview": RTCStreamWHEPPreview,
     "StartRTCStream": StartRTCStream,
     "UpdateRTCStream": UpdateRTCStream,
     "RTCStreamStatus": RTCStreamStatus,
@@ -919,7 +817,6 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "RTCStreamFrameInput": "RTC Stream Frame Input",
     "RTCStreamFrameOutput": "RTC Stream Frame Output",
-    "RTCStreamWHEPPreview": "RTC Stream WHEP Preview",
     "StartRTCStream": "Start RTC Stream",
     "UpdateRTCStream": "Update RTC Stream",
     "RTCStreamStatus": "RTC Stream Status",

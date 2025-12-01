@@ -14,14 +14,8 @@
             "args": [
                 "--pipeline-config", "./pipeline_config.json",
                 "--video-file", "./test.mp4",
-                "--duration", "60",
-                "--api-url", "https://api.daydream.live/v1/streams",
-                "--api-key", ""
+                "--loop"
             ],
-            "env": {
-                "DAYDREAM_API_URL": "https://api.daydream.live/v1/streams",
-                "DAYDREAM_API_KEY": ""
-            },
             "python": "${command:python.interpreterPath}"
         },
         {
@@ -38,10 +32,6 @@
                 "--video-file", "${workspaceFolder}/test.mp4",
                 "--log-level", "debug"
             ],
-            "env": {
-                "DAYDREAM_API_URL": "https://api.daydream.live/v1/streams",
-                "DAYDREAM_API_KEY": ""
-            },
             "justMyCode": false,
             "python": "${command:python.interpreterPath}"
         }

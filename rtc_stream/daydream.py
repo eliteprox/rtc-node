@@ -79,6 +79,55 @@ def start_stream(
     )
 
 
+def get_stream_info(
+    api_url: str,
+    api_key: str,
+    stream_id: str,
+    session: Optional[requests.Session] = None,
+) -> StreamInfo:
+    """
+    Retrieve the metadata for an existing stream.
+    """
+    if not stream_id:
+        raise ValueError("stream_id is required to fetch stream info")
+
+    resolved_url, resolved_key = resolve_credentials(api_url or "", api_key or "")
+
+    stream_endpoint = "v1/streams"
+    normalized = resolved_url.rstrip("/")
+    if normalized.endswith("/" + stream_endpoint):
+        base_url = normalized.rsplit("/" + stream_endpoint, 1)[0]
+    elif normalized.endswith(stream_endpoint):
+        base_url = normalized.rsplit(stream_endpoint, 1)[0].rstrip("/")
+    else:
+        base_url = normalized
+
+    target = urljoin(base_url + "/", f"{stream_endpoint}/{stream_id}")
+    sess = session or requests.Session()
+    response = sess.get(
+        target,
+        headers={
+            "Authorization": f"Bearer {resolved_key}",
+            "Accept": "application/json",
+            "Accept-Encoding": "identity",
+        },
+        timeout=30,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"Failed to fetch stream info {stream_id}: {response.status_code} {response.text}"
+        )
+    stream_data = response.json()
+    LOGGER.info("Fetched existing stream %s", stream_id)
+    return StreamInfo(
+        whip_url=stream_data.get("whip_url", ""),
+        playback_id=stream_data.get("output_playback_id", ""),
+        stream_id=stream_data.get("id", stream_id),
+        whep_url=stream_data.get("whep_url", ""),
+        stream_name=stream_data.get("name", ""),
+    )
+
+
 def poll_stream_status(
     api_url: str,
     api_key: str,

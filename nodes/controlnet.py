@@ -24,6 +24,23 @@ ALL_ALLOWED_PREPROCESSORS = tuple(
 DEFAULT_CONTROLNET_MODEL = CONTROLNET_MODEL_CHOICES[0]
 DEFAULT_PREPROCESSOR = CONTROLNET_REGISTRY[DEFAULT_CONTROLNET_MODEL]["default_preprocessor"]
 
+def _build_preprocessor_defaults() -> Dict[str, Dict[str, Any]]:
+    defaults: Dict[str, Dict[str, Any]] = {}
+    for definition in CONTROLNET_REGISTRY.values():
+        for preprocessor, values in definition.get("preprocessor_defaults", {}).items():
+            defaults[preprocessor] = values
+    return defaults
+
+PREPROCESSOR_DEFAULTS = _build_preprocessor_defaults()
+DEFAULT_PREPROCESSOR_CONDITIONING_SCALE = float(
+    PREPROCESSOR_DEFAULTS.get(DEFAULT_PREPROCESSOR, {}).get("conditioning_scale", 0.5)
+)
+PREPROCESSOR_SCALE_HINTS = ", ".join(
+    f"{preprocessor}={values.get('conditioning_scale')}"
+    for preprocessor, values in PREPROCESSOR_DEFAULTS.items()
+    if values.get("conditioning_scale") is not None
+)
+
 
 class ControlNetNode:
     """
@@ -45,15 +62,22 @@ class ControlNetNode:
                 }),
                 "preprocessor": (ALL_ALLOWED_PREPROCESSORS, {
                     "default": DEFAULT_PREPROCESSOR,
-                    "tooltip": "Preprocessor used for this ControlNet",
+                    "tooltip": (
+                        "Preprocessor used for this ControlNet (available choices depend "
+                        "on the selected model). Recommended values: "
+                        f"{PREPROCESSOR_SCALE_HINTS}"
+                    ),
                 }),
                 "conditioning_scale": ("FLOAT", {
-                    "default": 0.5,
+                    "default": DEFAULT_PREPROCESSOR_CONDITIONING_SCALE,
                     "min": 0.0,
                     "max": 2.0,
                     "step": 0.05,
-                    "display": "slider",
-                    "tooltip": "Influence strength for this ControlNet",
+                    "display": "number",
+                    "tooltip": (
+                        "Influence strength for this ControlNet. Leave the default unchanged "
+                        "to use the recommended scale for the selected preprocessor."
+                    ),
                 }),
             },
             "optional": {
@@ -62,7 +86,7 @@ class ControlNetNode:
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.05,
-                    "display": "slider",
+                    "display": "number",
                     "tooltip": "Normalized timestep to start applying control",
                 }),
                 "control_guidance_end": ("FLOAT", {
@@ -70,7 +94,7 @@ class ControlNetNode:
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.05,
-                    "display": "slider",
+                    "display": "number",
                     "tooltip": "Normalized timestep to stop applying control",
                 }),
                 "preprocessor_params": ("STRING", {
@@ -78,6 +102,7 @@ class ControlNetNode:
                     "multiline": True,
                     "placeholder": "{\"low_threshold\": 100}",
                     "tooltip": "Additional preprocessor configuration (JSON)",
+                    "label": "Preprocessor Params",
                 }),
                 "enabled": ("BOOLEAN", {
                     "default": True,
@@ -130,6 +155,10 @@ class ControlNetNode:
 
         if not isinstance(params_dict, dict):
             raise ValueError("preprocessor_params must decode to a JSON object")
+
+        default_params = PREPROCESSOR_DEFAULTS.get(preprocessor, {}).get("preprocessor_params")
+        if not params_dict and default_params:
+            params_dict = dict(default_params)
 
         controlnet_config = {
             "enabled": bool(enabled),
