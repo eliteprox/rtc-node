@@ -9,31 +9,13 @@ from the environment or .env files.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Tuple
 
+from .credentials_store import load_credentials_from_settings
 
 DEFAULT_API_URL = "https://api.daydream.live"
 ENV_API_URL = "DAYDREAM_API_URL"
 ENV_API_KEY = "DAYDREAM_API_KEY"
-
-_DOTENV_LOADED = False
-
-
-def _load_dotenv_if_available() -> None:
-    """Load the project's .env file once if python-dotenv is installed."""
-    global _DOTENV_LOADED
-    if _DOTENV_LOADED:
-        return
-    _DOTENV_LOADED = True
-    try:
-        from dotenv import load_dotenv  # type: ignore
-    except ImportError:
-        return
-
-    root_dir = Path(__file__).resolve().parent.parent
-    env_path = root_dir / ".env"
-    load_dotenv(env_path)
 
 
 def resolve_credentials(api_url: str = "", api_key: str = "") -> Tuple[str, str]:
@@ -42,14 +24,17 @@ def resolve_credentials(api_url: str = "", api_key: str = "") -> Tuple[str, str]
 
     Preference order:
     1. Explicit parameters supplied by caller.
-    2. Environment variables / values loaded from .env.
-    3. Default API URL (key has no default and must be supplied).
+    2. Values stored in ComfyUI settings.
+    3. Process environment variables.
+    4. Default API URL (key has no default and must be supplied).
     """
 
-    _load_dotenv_if_available()
+    state = load_credentials_from_settings()
+    settings_url = (state.get("api_url") or "").strip()
+    settings_key = (state.get("api_key") or "").strip()
 
-    resolved_url = (api_url or os.environ.get(ENV_API_URL, DEFAULT_API_URL)).strip()
-    resolved_key = (api_key or os.environ.get(ENV_API_KEY, "")).strip()
+    resolved_url = (api_url or settings_url or os.environ.get(ENV_API_URL, DEFAULT_API_URL)).strip()
+    resolved_key = (api_key or settings_key or os.environ.get(ENV_API_KEY, "")).strip()
 
     if not resolved_url:
         raise ValueError(

@@ -1,104 +1,51 @@
 import { app } from "../../../scripts/app.js";
-import { api } from "../../../scripts/api.js";
+import {
+  state,
+  subscribe,
+  refreshServerBase,
+  fetchRuntimeConfig,
+  refreshLocalServerState,
+  refreshStatus,
+  handleStart,
+  handleStop,
+  handleAbandon,
+  saveConfig,
+  extractRemoteState,
+  BADGE_CONFIG,
+  RUNNING_BADGES,
+  clampNumber,
+  createEmptyStatus
+} from "./daydream-api.js";
 
-// NOTE: Settings logic is now in daydream-settings.js
-const LOCAL_SERVER_SETTING_ID = "Daydream Live.local_rtc_server";
-const DEFAULT_SERVER_BASE = "http://127.0.0.1:8895";
-const STATUS_POLL_INTERVAL = 1000;
-const RTC_CONTROL_ENDPOINT = "/rtc/control";
-const CONFIG_ENDPOINT_CANDIDATES = ["/config", "/config/", "/runtime-config"];
-
-let serverBase = DEFAULT_SERVER_BASE;
-let pollTimer = null;
 let uiRefs = null;
-let currentStatus = {
-  running: false,
-  remote_status: {},
-  stream_id: "",
-  playback_id: "",
-  whip_url: "",
-  queue_depth: 0,
-  queue_stats: { depth: 0, buffered: 0 },
-};
-let currentConfig = {
-  frame_rate: 30,
-  frame_width: 1280,
-  frame_height: 720,
-};
-let streamUnavailable = false;
-let pendingStreamId = "";
-let resolvedConfigEndpoint = null;
-let localServerState = { running: false, host: null, port: null };
-let lastAlignedLocalBase = null;
-
-function normalizeServerBase(value) {
-  if (!value || typeof value !== "string") {
-    return DEFAULT_SERVER_BASE;
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return DEFAULT_SERVER_BASE;
-  }
-  return trimmed.replace(/\/+$/, "");
-}
-
-// Used to read the current setting value from the shared settings
-function refreshServerBase() {
-  const val = app.extensionManager.setting.get(LOCAL_SERVER_SETTING_ID);
-  const next = normalizeServerBase(val);
-  if (serverBase !== next) {
-    serverBase = next;
-    // If the server URL changed, we should probably refresh status immediately
-    if (uiRefs) {
-      refreshStatus(false);
-    }
-  }
-}
-
-function clampNumber(value, min, max, fallback) {
-  const num = Number(value);
-  if (Number.isFinite(num)) {
-    return Math.min(max, Math.max(min, num));
-  }
-  return fallback;
-}
-
-function readConfigForm() {
-  if (!uiRefs) {
-    return currentConfig;
-  }
-  return {
-    frame_rate: clampNumber(uiRefs.configFps?.value, 1, 240, currentConfig.frame_rate),
-    frame_width: clampNumber(uiRefs.configWidth?.value, 64, 4096, currentConfig.frame_width),
-    frame_height: clampNumber(uiRefs.configHeight?.value, 64, 4096, currentConfig.frame_height),
-  };
-}
+let pollTimer = null; // Used for local UI updates if needed, or we rely on api.js polling
+let statusDotRef = null;
+let statusDotMountTimer = null;
 
 function updateConfigControls(statusPayload = null, options = {}) {
   if (!uiRefs) return;
   const incoming =
     options.stream_settings || statusPayload?.stream_settings || null;
   if (incoming) {
-    currentConfig = {
-      frame_rate: incoming.frame_rate ?? currentConfig.frame_rate,
-      frame_width: incoming.frame_width ?? currentConfig.frame_width,
-      frame_height: incoming.frame_height ?? currentConfig.frame_height,
-    };
+    // We rely on state.currentConfig, but here we might receive a payload
   }
+  // Use state.currentConfig as the source of truth for values if not passed
+  const config = incoming || state.currentConfig;
+  
   const locked =
     typeof options.locked === "boolean"
       ? options.locked
       : Boolean(statusPayload?.running);
   if (uiRefs.configFps) {
-    uiRefs.configFps.value = currentConfig.frame_rate;
+    uiRefs.configFps.value = config.frame_rate;
     uiRefs.configFps.disabled = locked;
   }
   if (uiRefs.configWidth) {
-    uiRefs.configWidth.value = currentConfig.frame_width;
+    uiRefs.configWidth.value = config.frame_width;
     uiRefs.configWidth.disabled = locked;
   }
   if (uiRefs.configHeight) {
-    uiRefs.configHeight.value = currentConfig.frame_height;
+    uiRefs.configHeight.value = config.frame_height;
     uiRefs.configHeight.disabled = locked;
   }
   if (uiRefs.configSaveBtn) {
@@ -111,140 +58,26 @@ function updateConfigControls(statusPayload = null, options = {}) {
   }
 }
 
-function isNotFoundError(error) {
-  const match = error?.message?.match(/^(\d+):/);
-  return match !== null && Number(match[1]) === 404;
+function readConfigForm() {
+  if (!uiRefs) {
+    return state.currentConfig;
+  }
+  return {
+    frame_rate: clampNumber(uiRefs.configFps?.value, 1, 240, state.currentConfig.frame_rate),
+    frame_width: clampNumber(uiRefs.configWidth?.value, 64, 4096, state.currentConfig.frame_width),
+    frame_height: clampNumber(uiRefs.configHeight?.value, 64, 4096, state.currentConfig.frame_height),
+  };
 }
 
-function composeConfigCandidates() {
-  const candidates = [];
-  if (resolvedConfigEndpoint) {
-    candidates.push(resolvedConfigEndpoint);
-  }
-  for (const candidate of CONFIG_ENDPOINT_CANDIDATES) {
-    if (resolvedConfigEndpoint && candidate === resolvedConfigEndpoint) {
-      continue;
-    }
-    candidates.push(candidate);
-  }
-  return candidates;
-}
-
-function apiUrl(path) {
-  return `${serverBase}${path}`;
-}
-
-const LOCAL_REQUEST_TIMEOUT_MS = 1500;
-
-async function fetchJSON(path, options = {}, timeout = LOCAL_REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  let response;
-  try {
-    response = await fetch(apiUrl(path), {
-      signal: controller.signal,
-      ...options,
-    });
-  } catch (error) {
-    if (error.name === "AbortError") {
-      throw new Error("Request timed out");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-  const text = await response.text();
-  let json = {};
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    json = { error: text };
-  }
-  if (!response.ok) {
-    throw new Error(`${response.status}: ${text || response.statusText}`);
-  }
-  if (response.status === 204) {
-    return {};
-  }
-  return json;
-}
-
-async function requestConfigEndpoint(options = {}) {
-  const candidates = composeConfigCandidates();
-  let lastError = null;
-  for (const candidate of candidates) {
-    try {
-      const payload = await fetchJSON(candidate, options);
-      resolvedConfigEndpoint = candidate;
-      return payload;
-    } catch (error) {
-      lastError = error;
-      if (!isNotFoundError(error)) {
-        throw error;
-      }
-    }
-  }
-  if (lastError) {
-    throw lastError;
-  }
-  throw new Error("No config endpoint found");
-}
-
-async function fetchRuntimeConfig() {
-  try {
-    const payload = await requestConfigEndpoint();
-    currentConfig = {
-      frame_rate: payload.frame_rate ?? currentConfig.frame_rate,
-      frame_width: payload.frame_width ?? currentConfig.frame_width,
-      frame_height: payload.frame_height ?? currentConfig.frame_height,
-    };
-    updateConfigControls(null, {
-      locked: Boolean(payload.locked),
-      stream_settings: currentConfig,
-    });
-  } catch (error) {
-    console.warn("Unable to load RTC runtime config", error);
-  }
-}
-
-async function handleConfigSave() {
-  if (currentStatus?.running) {
-    toast("warn", "Daydream Live", "Stop the stream before editing FPS/size.");
-    return;
-  }
+async function handleConfigSaveWrapper() {
   const payload = readConfigForm();
   try {
-    const response = await requestConfigEndpoint({
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    currentConfig = {
-      frame_rate: response.frame_rate,
-      frame_width: response.frame_width,
-      frame_height: response.frame_height,
-    };
-    updateConfigControls(null, {
-      locked: Boolean(response.locked),
-      stream_settings: currentConfig,
-    });
-    toast("success", "Daydream Live", "Stream settings saved");
+    await saveConfig(payload);
+    // UI update happens via subscription
   } catch (error) {
-    toast("error", "Daydream Live", `Unable to save settings: ${error.message}`);
+    // Error toast handled in api.js
   }
 }
-
-const BADGE_CONFIG = {
-  STOPPED: { label: "STOPPED", className: "idle", pulse: false },
-  CREATING: { label: "CREATING", className: "info", pulse: true },
-  STARTING: { label: "STARTING", className: "starting", pulse: true },
-  LOADING: { label: "LOADING", className: "loading", pulse: true },
-  ONLINE: { label: "ONLINE", className: "running", pulse: true },
-  OFFLINE: { label: "OFFLINE", className: "warning", pulse: true },
-  ERROR: { label: "ERROR", className: "error", pulse: false },
-  NO_SERVER: { label: "NO SERVER", className: "error", pulse: false },
-  NOT_FOUND: { label: "NOT FOUND", className: "error", pulse: false },
-};
 
 function ensureStylesInjected() {
   if (document.getElementById("daydream-live-styles")) {
@@ -440,97 +273,51 @@ function ensureStylesInjected() {
       opacity: 0.6;
       cursor: not-allowed;
     }
+    .ddl-sidebar-status-dot {
+      position: absolute;
+      top: 4px;
+      right: 4px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #4a4a4a;
+      border: 1px solid rgba(0,0,0,0.3);
+      pointer-events: none;
+      transition: background 0.3s ease, box-shadow 0.3s ease;
+    }
+    .ddl-sidebar-status-dot.active {
+      background: #1c7c54;
+      box-shadow: 0 0 6px #1c7c54;
+    }
+    .ddl-sidebar-status-dot.starting {
+      background: #2d7dd2;
+      box-shadow: 0 0 6px #2d7dd2;
+      animation: ddlDotPulse 1.2s ease-in-out infinite;
+    }
+    .ddl-sidebar-status-dot.error {
+      background: #b3261e;
+      box-shadow: 0 0 6px #b3261e;
+    }
+    @keyframes ddlDotPulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
   `;
   document.head.appendChild(style);
-}
-
-function toast(severity, summary, detail) {
-  app.extensionManager.toast.add({
-    severity,
-    summary,
-    detail,
-    life: 3500,
-  });
-}
-
-async function callRtcControl(action, payload = {}) {
-  const body = JSON.stringify({ action, ...payload });
-  const response = await fetch(RTC_CONTROL_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body,
-  });
-  const text = await response.text();
-  let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    data = { error: text };
-  }
-  if (!response.ok || data.success === false) {
-    const message = data.error || response.statusText || "RTC control request failed";
-    throw new Error(message);
-  }
-  return data;
-}
-
-async function refreshLocalServerState({ quiet = false } = {}) {
-  try {
-    const data = await callRtcControl("status");
-    localServerState = data.status || { running: false, host: null, port: null };
-    updateLocalApiDisplay();
-    return localServerState;
-  } catch (error) {
-    localServerState = { running: false, host: null, port: null };
-    updateLocalApiDisplay();
-    if (quiet) {
-      return localServerState;
-    }
-    throw error;
-  }
 }
 
 function updateLocalApiDisplay() {
   if (!uiRefs?.localApiValue) {
     return;
   }
-  const running = Boolean(localServerState?.running);
+  const running = Boolean(state.localServerState?.running);
   if (running) {
-    const host = localServerState.host || "127.0.0.1";
-    const port = localServerState.port ?? "—";
+    const host = state.localServerState.host || "127.0.0.1";
+    const port = state.localServerState.port ?? "—";
     uiRefs.localApiValue.textContent = `${host}:${port}`;
-    alignLocalServerBase(host, port);
   } else {
     uiRefs.localApiValue.textContent = "Offline";
-    lastAlignedLocalBase = null;
   }
-}
-
-function alignLocalServerBase(host, port) {
-  if (!host || !port) {
-    return;
-  }
-  const localBase = `http://${host}:${port}`;
-  if (lastAlignedLocalBase === localBase) {
-    return;
-  }
-  const looksLocal = /^https?:\/\/127\.0\.0\.1/i.test(serverBase || "") || serverBase === DEFAULT_SERVER_BASE;
-  if (looksLocal && serverBase !== localBase) {
-    serverBase = localBase;
-    lastAlignedLocalBase = localBase;
-  }
-}
-
-async function ensureLocalServerReady() {
-  if (localServerState?.running) {
-    return true;
-  }
-  await callRtcControl("start");
-  await refreshLocalServerState({ quiet: false });
-  if (!localServerState?.running) {
-    throw new Error("Local API server failed to start");
-  }
-  return true;
 }
 
 function applyBadgeState(stateKey, overrideLabel) {
@@ -543,100 +330,6 @@ function applyBadgeState(stateKey, overrideLabel) {
   uiRefs.statusBadge.textContent = label;
 }
 
-function extractRemoteState(statusPayload) {
-  const remoteStatus = statusPayload?.remote_status || {};
-  const phase = (remoteStatus.phase || "").toUpperCase();
-  const phaseDetail = remoteStatus.detail || remoteStatus.remoteText || "";
-  if (phase) {
-    if (phase === "STREAM_CREATED") {
-      return { badge: "CREATING", remoteText: phaseDetail || "Stream created" };
-    }
-    if (phase === "WHIP_OFFER") {
-      return { badge: "STARTING", remoteText: phaseDetail || "Sending WHIP offer" };
-    }
-    if (phase === "WHIP_ANSWER" || phase === "WHIP_ESTABLISHED") {
-      return { badge: "ONLINE", remoteText: phaseDetail || "WHIP established" };
-    }
-    if (phase.startsWith("ICE_") || phase.startsWith("PEER_")) {
-      return { badge: "LOADING", remoteText: phaseDetail || phase };
-    }
-    if (phase === "STOPPED") {
-      return { badge: "STOPPED", remoteText: phaseDetail || "Stopped" };
-    }
-  }
-  const httpStatus =
-    remoteStatus.http_status ??
-    remoteStatus.status_code ??
-    remoteStatus.code;
-  const body = remoteStatus.body || remoteStatus;
-
-  if (httpStatus === 404) {
-    return { badge: "NOT_FOUND", remoteText: "Not found" };
-  }
-
-  if (!statusPayload?.running) {
-    if (
-      statusPayload?.stream_id &&
-      statusPayload.stream_id === pendingStreamId
-    ) {
-      return {
-        badge: "STARTING",
-        remoteText:
-          phaseDetail || "Waiting for Daydream Live to accept the WHIP session",
-      };
-    }
-    return { badge: "STOPPED", remoteText: "Stopped" };
-  }
-
-  const explicitState =
-    body?.data?.state ||
-    body?.state ||
-    body?.status ||
-    body?.inference_status?.state ||
-    "";
-
-  const normalized = typeof explicitState === "string" ? explicitState.toUpperCase() : "";
-
-  if (normalized === "ONLINE" || normalized === "READY") {
-    return { badge: "ONLINE", remoteText: normalized };
-  }
-
-  if (normalized === "LOADING" || normalized === "INITIALIZING" || normalized === "STARTING") {
-    return { badge: "LOADING", remoteText: normalized };
-  }
-
-  if (normalized === "OFFLINE") {
-    return { badge: "OFFLINE", remoteText: "OFFLINE" };
-  }
-
-  if (body?.success === true && body?.data?.state) {
-    const state = body.data.state.toUpperCase();
-    if (state === "OFFLINE") {
-      return { badge: "OFFLINE", remoteText: "OFFLINE" };
-    }
-    if (state === "ONLINE") {
-      return { badge: "ONLINE", remoteText: "ONLINE" };
-    }
-  }
-
-  if (body?.error) {
-    if (/not\s+found/i.test(body.error)) {
-      return { badge: "NOT_FOUND", remoteText: "Not found" };
-    }
-    return { badge: "ERROR", remoteText: body.error };
-  }
-
-  if (httpStatus && httpStatus >= 400) {
-    return { badge: "ERROR", remoteText: `HTTP ${httpStatus}` };
-  }
-
-  if (statusPayload?.stream_id) {
-    return { badge: "STARTING", remoteText: normalized || "STARTING" };
-  }
-
-  return { badge: "STOPPED", remoteText: "Stopped" };
-}
-
 function updateInfoFields(statusPayload, options = {}) {
   if (!uiRefs) return;
   const basePayload = statusPayload || {};
@@ -647,9 +340,11 @@ function updateInfoFields(statusPayload, options = {}) {
     displayPayload.playback_id = "";
     displayPayload.whip_url = "";
   }
+  
   const { stream_id, playback_id, whip_url } = displayPayload;
   const queueDepth = basePayload?.queue_depth ?? 0;
   const buffered = basePayload?.queue_stats?.buffered ?? 0;
+  
   uiRefs.streamId.textContent = stream_id || "—";
   if (playback_id) {
     uiRefs.playbackId.innerHTML = `<a href="https://lvpr.tv?v=${playback_id}" target="_blank" rel="noopener noreferrer">${playback_id}</a>`;
@@ -688,11 +383,10 @@ function updateActionButtons(statusPayload, descriptor) {
   const pendingStream =
     hasStreamId &&
     !isRunning &&
-    statusPayload?.stream_id === pendingStreamId;
+    statusPayload?.stream_id === state.pendingStreamId;
   const isNotFound = descriptor.badge === "NOT_FOUND";
 
   if (isRunning) {
-    pendingStreamId = "";
     primary.textContent = "Stop Stream";
     primary.className = "ddl-button ddl-button-danger";
     primary.disabled = false;
@@ -702,8 +396,7 @@ function updateActionButtons(statusPayload, descriptor) {
   }
 
   if (isNotFound) {
-    streamUnavailable = true;
-    pendingStreamId = "";
+    // State handled in API, here we just render
     primary.textContent = "Start Stream";
     primary.className = "ddl-button ddl-button-primary";
     primary.disabled = true;
@@ -716,7 +409,6 @@ function updateActionButtons(statusPayload, descriptor) {
     return;
   }
 
-  streamUnavailable = false;
   primary.textContent = "Start Stream";
   primary.className = "ddl-button ddl-button-primary";
   primary.disabled = false;
@@ -731,163 +423,6 @@ function updateActionButtons(statusPayload, descriptor) {
   } else {
     secondary.style.display = "none";
   }
-}
-
-function createEmptyStatus() {
-  return {
-    running: false,
-    remote_status: {},
-    stream_id: "",
-    playback_id: "",
-    whip_url: "",
-    queue_depth: 0,
-    queue_stats: { depth: 0, buffered: 0 },
-  };
-}
-
-async function refreshStatus(showToast = false) {
-  try {
-    const status = await fetchJSON("/status");
-    currentStatus = status;
-    updateInfoFields(status);
-    if (showToast) {
-      toast(
-        "info",
-        "Daydream Live",
-        `Stream is ${status.running ? "running" : "stopped"}`
-      );
-    }
-  } catch (error) {
-    console.warn("Unable to fetch Daydream Live status", error);
-    const fallbackStatus = currentStatus ? { ...currentStatus } : createEmptyStatus();
-    const localState = await refreshLocalServerState({ quiet: true });
-    let descriptorOverride = {
-      badge: "NO_SERVER",
-      remoteText: "Local API server unavailable",
-    };
-
-    if (localState?.running) {
-      const awaitingPending =
-        pendingStreamId && pendingStreamId === fallbackStatus.stream_id;
-      if (awaitingPending) {
-        fallbackStatus.running = true;
-        descriptorOverride = {
-          badge: "STARTING",
-          remoteText: "Waiting for Daydream Live to finish starting…",
-        };
-      } else {
-        const hasActiveStream =
-          Boolean(fallbackStatus.running) || Boolean(fallbackStatus.stream_id);
-        fallbackStatus.running = hasActiveStream;
-        descriptorOverride = hasActiveStream
-          ? {
-              badge: "LOADING",
-              remoteText: "Stream is starting; status will update shortly…",
-            }
-          : { badge: "STOPPED", remoteText: "Stopped" };
-      }
-    }
-
-    updateInfoFields(fallbackStatus, { descriptorOverride });
-    //toast("error", "Daydream Live", `Unable to fetch status: ${error.message}`);
-  }
-}
-
-async function handleStart() {
-  if (streamUnavailable) {
-    toast(
-      "warn",
-      "Daydream Live",
-      "Stream previously removed; clear it before creating a new one."
-    );
-    return;
-  }
-  try {
-    await ensureLocalServerReady();
-  } catch (error) {
-    applyBadgeState("NO_SERVER");
-    toast("error", "Daydream Live", `Local API server unavailable: ${error.message}`);
-    return;
-  }
-  applyBadgeState("CREATING");
-  if (uiRefs) {
-    uiRefs.remoteInfo.textContent = "Creating stream…";
-  }
-  try {
-    const payload = await fetchJSON("/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-    toast("success", "Daydream Live", "Stream started");
-    currentStatus = payload;
-    streamUnavailable = false;
-    pendingStreamId = payload.stream_id || "";
-    applyBadgeState("STARTING");
-    if (uiRefs) {
-      uiRefs.remoteInfo.textContent = "Starting…";
-    }
-    updateInfoFields(payload);
-    await refreshStatus(false);
-  } catch (error) {
-    applyBadgeState("ERROR");
-    toast("error", "Daydream Live", `Start failed: ${error.message}`);
-  }
-}
-
-async function handleStop() {
-  try {
-    const payload = await fetchJSON("/stop", { method: "POST" });
-    toast("warn", "Daydream Live", "Stream stopped");
-    const clearedStatus = createEmptyStatus();
-    currentStatus = clearedStatus;
-    pendingStreamId = "";
-    updateInfoFields(clearedStatus, {
-      descriptorOverride: { badge: "STOPPED", remoteText: "Stream stopped" },
-      resetStream: true,
-    });
-  } catch (error) {
-    toast("error", "Daydream Live", `Stop failed: ${error.message}`);
-  } finally {
-    applyBadgeState("STOPPED");
-    streamUnavailable = false;
-    pendingStreamId = "";
-  }
-}
-
-async function handleAbandon() {
-  if (streamUnavailable) {
-    streamUnavailable = false;
-    clearStreamState("Stream cleared");
-    return;
-  }
-
-  try {
-    const payload = await fetchJSON("/stop", { method: "POST" });
-    toast("warn", "Daydream Live", "Stream abandoned");
-    const clearedStatus = createEmptyStatus();
-    currentStatus = clearedStatus;
-    updateInfoFields(clearedStatus, {
-      descriptorOverride: { badge: "STOPPED", remoteText: "Stream abandoned" },
-      resetStream: true,
-    });
-  } catch (error) {
-    toast("error", "Daydream Live", `Unable to abandon stream: ${error.message}`);
-  } finally {
-    streamUnavailable = false;
-    pendingStreamId = "";
-  }
-}
-
-function clearStreamState(message = "Stream reset") {
-  pendingStreamId = "";
-  const resetStatus = createEmptyStatus();
-  currentStatus = resetStatus;
-  toast("info", "Daydream Live", message);
-  updateInfoFields(resetStatus, {
-    descriptorOverride: { badge: "STOPPED", remoteText: message },
-    resetStream: true,
-  });
 }
 
 function buildPanel(el) {
@@ -995,7 +530,7 @@ function buildPanel(el) {
   fpsInput.max = "240";
   fpsInput.step = "1";
   fpsInput.className = "ddl-config-input";
-  fpsInput.value = currentConfig.frame_rate;
+  fpsInput.value = state.currentConfig.frame_rate;
 
   const widthInput = document.createElement("input");
   widthInput.type = "number";
@@ -1003,7 +538,7 @@ function buildPanel(el) {
   widthInput.max = "4096";
   widthInput.step = "1";
   widthInput.className = "ddl-config-input";
-  widthInput.value = currentConfig.frame_width;
+  widthInput.value = state.currentConfig.frame_width;
 
   const heightInput = document.createElement("input");
   heightInput.type = "number";
@@ -1011,7 +546,7 @@ function buildPanel(el) {
   heightInput.max = "4096";
   heightInput.step = "1";
   heightInput.className = "ddl-config-input";
-  heightInput.value = currentConfig.frame_height;
+  heightInput.value = state.currentConfig.frame_height;
 
   const makeConfigField = (labelText, inputEl) => {
     const wrapper = document.createElement("div");
@@ -1034,7 +569,7 @@ function buildPanel(el) {
   const configSaveBtn = document.createElement("button");
   configSaveBtn.className = "ddl-button ddl-button-secondary";
   configSaveBtn.textContent = "Save Stream Settings";
-  configSaveBtn.onclick = () => handleConfigSave();
+  configSaveBtn.onclick = () => handleConfigSaveWrapper();
   configActions.appendChild(configSaveBtn);
   configCard.appendChild(configActions);
 
@@ -1101,17 +636,9 @@ function buildPanel(el) {
     localApiValue,
   };
 
-  updateConfigControls(null, { locked: false, stream_settings: currentConfig });
-  fetchRuntimeConfig();
-  refreshLocalServerState({ quiet: true })
-    .catch(() => {})
-    .finally(() => {
-      refreshStatus(false);
-      if (pollTimer) {
-        clearInterval(pollTimer);
-      }
-      pollTimer = setInterval(() => refreshStatus(false), STATUS_POLL_INTERVAL);
-    });
+  updateConfigControls(null, { locked: false, stream_settings: state.currentConfig });
+  updateInfoFields(state.currentStatus);
+  updateLocalApiDisplay();
 }
 
 function setActivePanel(panel) {
@@ -1132,13 +659,88 @@ app.extensionManager.registerSidebarTab({
   render: (el) => buildPanel(el),
 });
 
-// Listen for notifications from backend nodes
-api.addEventListener("rtc-stream-notification", (event) => {
-  const { severity, summary, detail } = event.detail;
-  if (severity && summary) {
-    toast(severity, summary, detail || "");
+function updateSidebarStatusDot(descriptor = null) {
+  if (!statusDotRef) return;
+  const desc = descriptor || extractRemoteState(state.currentStatus || {});
+  const badge = desc?.badge || "STOPPED";
+  
+  statusDotRef.classList.remove("active", "starting", "error");
+  
+  if (badge === "ONLINE") {
+    statusDotRef.classList.add("active");
+  } else if (RUNNING_BADGES.has(badge) && badge !== "ONLINE") {
+    statusDotRef.classList.add("starting");
+  } else if (badge === "ERROR" || badge === "NO_SERVER" || badge === "NOT_FOUND") {
+    statusDotRef.classList.add("error");
   }
+  // Otherwise stays idle (gray)
+}
+
+function mountSidebarStatusDot() {
+  ensureStylesInjected();
+  // Find the sidebar tab button for DaydreamLive
+  const tabButton = document.querySelector('[data-id="DaydreamLive"]');
+  if (!tabButton) return false;
+  
+  // Check if dot already exists
+  if (tabButton.querySelector(".ddl-sidebar-status-dot")) {
+    statusDotRef = tabButton.querySelector(".ddl-sidebar-status-dot");
+    return true;
+  }
+  
+  // Ensure the button has position relative for absolute positioning of dot
+  const computedStyle = window.getComputedStyle(tabButton);
+  if (computedStyle.position === "static") {
+    tabButton.style.position = "relative";
+  }
+  
+  const dot = document.createElement("span");
+  dot.className = "ddl-sidebar-status-dot";
+  tabButton.appendChild(dot);
+  statusDotRef = dot;
+  updateSidebarStatusDot();
+  return true;
+}
+
+function initSidebarStatusDot() {
+  if (statusDotRef && document.body.contains(statusDotRef)) {
+    return;
+  }
+  if (mountSidebarStatusDot()) {
+    if (statusDotMountTimer) {
+      clearInterval(statusDotMountTimer);
+      statusDotMountTimer = null;
+    }
+    return;
+  }
+  // Retry until sidebar is rendered
+  if (!statusDotMountTimer) {
+    let attempts = 0;
+    statusDotMountTimer = setInterval(() => {
+      if (mountSidebarStatusDot()) {
+        clearInterval(statusDotMountTimer);
+        statusDotMountTimer = null;
+      } else if (attempts++ > 60) {
+        clearInterval(statusDotMountTimer);
+        statusDotMountTimer = null;
+      }
+    }, 500);
+  }
+}
+
+// Subscribe to state changes from api.js
+subscribe((newState, event) => {
+  if (event?.type === "local_state_updated") {
+    updateLocalApiDisplay();
+  }
+  const descriptor = event?.descriptorOverride;
+  updateInfoFields(newState.currentStatus, { descriptorOverride: descriptor });
+  if (event?.type === "config_updated" || event?.type === "config_saved") {
+    updateConfigControls(null, { stream_settings: newState.currentConfig });
+  }
+  updateSidebarStatusDot(descriptor);
 });
 
 // Initial sync
 refreshServerBase();
+initSidebarStatusDot();
