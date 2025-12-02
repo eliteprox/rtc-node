@@ -1,15 +1,9 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 
-const SERVER_BASE_SETTING_ID = "daydream.server_base";
-const LEGACY_SERVER_BASE_SETTING_ID = "rtc.daydream.server_base";
-const API_BASE_SETTING_ID = "daydream.api_base";
-const WINDOW_SERVER_BASE =
-  typeof window !== "undefined" && window.DAYDREAM_SERVER_BASE
-    ? window.DAYDREAM_SERVER_BASE
-    : null;
+// NOTE: Settings logic is now in daydream-settings.js
+const LOCAL_SERVER_SETTING_ID = "Daydream Live.local_rtc_server";
 const DEFAULT_SERVER_BASE = "http://127.0.0.1:8895";
-const DEFAULT_API_BASE = "https://api.daydream.live";
 const STATUS_POLL_INTERVAL = 1000;
 const RTC_CONTROL_ENDPOINT = "/rtc/control";
 const CONFIG_ENDPOINT_CANDIDATES = ["/config", "/config/", "/runtime-config"];
@@ -48,83 +42,18 @@ function normalizeServerBase(value) {
   return trimmed.replace(/\/+$/, "");
 }
 
-function setServerBase(newValue, { suppressRefresh = false } = {}) {
-  const next = normalizeServerBase(newValue);
-  if (serverBase === next) {
-    return;
-  }
-  serverBase = next;
-  if (!suppressRefresh && uiRefs) {
-    refreshStatus(false);
+// Used to read the current setting value from the shared settings
+function refreshServerBase() {
+  const val = app.extensionManager.setting.get(LOCAL_SERVER_SETTING_ID);
+  const next = normalizeServerBase(val);
+  if (serverBase !== next) {
+    serverBase = next;
+    // If the server URL changed, we should probably refresh status immediately
+    if (uiRefs) {
+      refreshStatus(false);
+    }
   }
 }
-
-function initServerBaseSetting() {
-  if (WINDOW_SERVER_BASE) {
-    setServerBase(WINDOW_SERVER_BASE, { suppressRefresh: true });
-    return;
-  }
-
-  app.registerExtension({
-    name: "DayDream Live",
-    settings: [
-      {
-        id: SERVER_BASE_SETTING_ID,
-        name: "Local API Server Base URL",
-        type: "text",
-        defaultValue: DEFAULT_SERVER_BASE,
-        tooltip: "Base REST endpoint for the local DayDream API server",
-        attrs: {
-          placeholder: DEFAULT_SERVER_BASE,
-        },
-        onChange: (value, _oldValue) => {
-          setServerBase(value);
-        },
-      },
-      {
-        id: API_BASE_SETTING_ID,
-        name: "DayDream API Base URL",
-        type: "text",
-        defaultValue: DEFAULT_API_BASE,
-        tooltip: "Base REST endpoint for the DayDream Live API",
-        attrs: {
-          placeholder: DEFAULT_API_BASE,
-        },
-      },
-    ],
-    setup() {
-      const stored = app.extensionManager.setting.get(SERVER_BASE_SETTING_ID);
-      const legacyStored = app.extensionManager.setting.get(
-        LEGACY_SERVER_BASE_SETTING_ID
-      );
-      const initialValue = stored ?? legacyStored;
-      if (initialValue) {
-        setServerBase(initialValue, { suppressRefresh: true });
-        if (legacyStored && !stored) {
-          app.extensionManager.setting
-            .set(SERVER_BASE_SETTING_ID, legacyStored)
-            .catch((err) =>
-              console.error("Failed to migrate local API server setting", err)
-            );
-        }
-      } else {
-        app.extensionManager.setting
-          .set(SERVER_BASE_SETTING_ID, DEFAULT_SERVER_BASE)
-          .catch((err) =>
-            console.error("Failed to persist local API server setting", err)
-          );
-      }
-      const storedApiBase = app.extensionManager.setting.get(API_BASE_SETTING_ID);
-      if (!storedApiBase) {
-        app.extensionManager.setting
-          .set(API_BASE_SETTING_ID, DEFAULT_API_BASE)
-          .catch((err) => console.error("Failed to persist DayDream API Base setting", err));
-      }
-    },
-  });
-}
-
-initServerBaseSetting();
 
 function clampNumber(value, min, max, fallback) {
   const num = Number(value);
@@ -201,6 +130,45 @@ function composeConfigCandidates() {
   return candidates;
 }
 
+function apiUrl(path) {
+  return `${serverBase}${path}`;
+}
+
+const LOCAL_REQUEST_TIMEOUT_MS = 1500;
+
+async function fetchJSON(path, options = {}, timeout = LOCAL_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  let response;
+  try {
+    response = await fetch(apiUrl(path), {
+      signal: controller.signal,
+      ...options,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("Request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await response.text();
+  let json = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { error: text };
+  }
+  if (!response.ok) {
+    throw new Error(`${response.status}: ${text || response.statusText}`);
+  }
+  if (response.status === 204) {
+    return {};
+  }
+  return json;
+}
+
 async function requestConfigEndpoint(options = {}) {
   const candidates = composeConfigCandidates();
   let lastError = null;
@@ -241,7 +209,7 @@ async function fetchRuntimeConfig() {
 
 async function handleConfigSave() {
   if (currentStatus?.running) {
-    toast("warn", "DayDream Live", "Stop the stream before editing FPS/size.");
+    toast("warn", "Daydream Live", "Stop the stream before editing FPS/size.");
     return;
   }
   const payload = readConfigForm();
@@ -260,9 +228,9 @@ async function handleConfigSave() {
       locked: Boolean(response.locked),
       stream_settings: currentConfig,
     });
-    toast("success", "DayDream Live", "Stream settings saved");
+    toast("success", "Daydream Live", "Stream settings saved");
   } catch (error) {
-    toast("error", "DayDream Live", `Unable to save settings: ${error.message}`);
+    toast("error", "Daydream Live", `Unable to save settings: ${error.message}`);
   }
 }
 
@@ -565,45 +533,6 @@ async function ensureLocalServerReady() {
   return true;
 }
 
-function apiUrl(path) {
-  return `${serverBase}${path}`;
-}
-
-const LOCAL_REQUEST_TIMEOUT_MS = 1500;
-
-async function fetchJSON(path, options = {}, timeout = LOCAL_REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-  let response;
-  try {
-    response = await fetch(apiUrl(path), {
-      signal: controller.signal,
-      ...options,
-    });
-  } catch (error) {
-    if (error.name === "AbortError") {
-      throw new Error("Request timed out");
-    }
-    throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-  const text = await response.text();
-  let json = {};
-  try {
-    json = text ? JSON.parse(text) : {};
-  } catch {
-    json = { error: text };
-  }
-  if (!response.ok) {
-    throw new Error(`${response.status}: ${text || response.statusText}`);
-  }
-  if (response.status === 204) {
-    return {};
-  }
-  return json;
-}
-
 function applyBadgeState(stateKey, overrideLabel) {
   if (!uiRefs) return;
   const cfg = BADGE_CONFIG[stateKey] || BADGE_CONFIG.STOPPED;
@@ -653,7 +582,7 @@ function extractRemoteState(statusPayload) {
       return {
         badge: "STARTING",
         remoteText:
-          phaseDetail || "Waiting for DayDream Live to accept the WHIP session",
+          phaseDetail || "Waiting for Daydream Live to accept the WHIP session",
       };
     }
     return { badge: "STOPPED", remoteText: "Stopped" };
@@ -824,18 +753,43 @@ async function refreshStatus(showToast = false) {
     if (showToast) {
       toast(
         "info",
-        "DayDream Live",
+        "Daydream Live",
         `Stream is ${status.running ? "running" : "stopped"}`
       );
     }
   } catch (error) {
-    try {
-      await refreshLocalServerState({ quiet: true });
-    } catch {
-      // swallow
+    console.warn("Unable to fetch Daydream Live status", error);
+    const fallbackStatus = currentStatus ? { ...currentStatus } : createEmptyStatus();
+    const localState = await refreshLocalServerState({ quiet: true });
+    let descriptorOverride = {
+      badge: "NO_SERVER",
+      remoteText: "Local API server unavailable",
+    };
+
+    if (localState?.running) {
+      const awaitingPending =
+        pendingStreamId && pendingStreamId === fallbackStatus.stream_id;
+      if (awaitingPending) {
+        fallbackStatus.running = true;
+        descriptorOverride = {
+          badge: "STARTING",
+          remoteText: "Waiting for Daydream Live to finish starting…",
+        };
+      } else {
+        const hasActiveStream =
+          Boolean(fallbackStatus.running) || Boolean(fallbackStatus.stream_id);
+        fallbackStatus.running = hasActiveStream;
+        descriptorOverride = hasActiveStream
+          ? {
+              badge: "LOADING",
+              remoteText: "Stream is starting; status will update shortly…",
+            }
+          : { badge: "STOPPED", remoteText: "Stopped" };
+      }
     }
-    applyBadgeState("NO_SERVER");
-    //toast("error", "DayDream Live", `Unable to fetch status: ${error.message}`);
+
+    updateInfoFields(fallbackStatus, { descriptorOverride });
+    //toast("error", "Daydream Live", `Unable to fetch status: ${error.message}`);
   }
 }
 
@@ -843,7 +797,7 @@ async function handleStart() {
   if (streamUnavailable) {
     toast(
       "warn",
-      "DayDream Live",
+      "Daydream Live",
       "Stream previously removed; clear it before creating a new one."
     );
     return;
@@ -852,7 +806,7 @@ async function handleStart() {
     await ensureLocalServerReady();
   } catch (error) {
     applyBadgeState("NO_SERVER");
-    toast("error", "DayDream Live", `Local API server unavailable: ${error.message}`);
+    toast("error", "Daydream Live", `Local API server unavailable: ${error.message}`);
     return;
   }
   applyBadgeState("CREATING");
@@ -865,7 +819,7 @@ async function handleStart() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),
     });
-    toast("success", "DayDream Live", "Stream started");
+    toast("success", "Daydream Live", "Stream started");
     currentStatus = payload;
     streamUnavailable = false;
     pendingStreamId = payload.stream_id || "";
@@ -877,14 +831,14 @@ async function handleStart() {
     await refreshStatus(false);
   } catch (error) {
     applyBadgeState("ERROR");
-    toast("error", "DayDream Live", `Start failed: ${error.message}`);
+    toast("error", "Daydream Live", `Start failed: ${error.message}`);
   }
 }
 
 async function handleStop() {
   try {
     const payload = await fetchJSON("/stop", { method: "POST" });
-    toast("warn", "DayDream Live", "Stream stopped");
+    toast("warn", "Daydream Live", "Stream stopped");
     const clearedStatus = createEmptyStatus();
     currentStatus = clearedStatus;
     pendingStreamId = "";
@@ -893,7 +847,7 @@ async function handleStop() {
       resetStream: true,
     });
   } catch (error) {
-    toast("error", "DayDream Live", `Stop failed: ${error.message}`);
+    toast("error", "Daydream Live", `Stop failed: ${error.message}`);
   } finally {
     applyBadgeState("STOPPED");
     streamUnavailable = false;
@@ -910,7 +864,7 @@ async function handleAbandon() {
 
   try {
     const payload = await fetchJSON("/stop", { method: "POST" });
-    toast("warn", "DayDream Live", "Stream abandoned");
+    toast("warn", "Daydream Live", "Stream abandoned");
     const clearedStatus = createEmptyStatus();
     currentStatus = clearedStatus;
     updateInfoFields(clearedStatus, {
@@ -918,7 +872,7 @@ async function handleAbandon() {
       resetStream: true,
     });
   } catch (error) {
-    toast("error", "DayDream Live", `Unable to abandon stream: ${error.message}`);
+    toast("error", "Daydream Live", `Unable to abandon stream: ${error.message}`);
   } finally {
     streamUnavailable = false;
     pendingStreamId = "";
@@ -929,7 +883,7 @@ function clearStreamState(message = "Stream reset") {
   pendingStreamId = "";
   const resetStatus = createEmptyStatus();
   currentStatus = resetStatus;
-  toast("info", "DayDream Live", message);
+  toast("info", "Daydream Live", message);
   updateInfoFields(resetStatus, {
     descriptorOverride: { badge: "STOPPED", remoteText: message },
     resetStream: true,
@@ -964,7 +918,7 @@ function buildPanel(el) {
   controlsPanel.appendChild(badge);
 
   const header = document.createElement("div");
-  header.innerHTML = "<h3>DayDream Live</h3><div class='ddl-note'>Control the RTC stream ingest</div>";
+  header.innerHTML = "<h3>Daydream Live</h3><div class='ddl-note'>Control the RTC stream ingest</div>";
   controlsPanel.appendChild(header);
 
   const infoGrid = document.createElement("div");
@@ -1170,10 +1124,10 @@ function setActivePanel(panel) {
 }
 
 app.extensionManager.registerSidebarTab({
-  id: "DayDreamLive",
+  id: "DaydreamLive",
   icon: "pi pi-play",
-  title: "DayDream Live",
-  tooltip: "Manage DayDream Live stream",
+  title: "Daydream Live",
+  tooltip: "Manage Daydream Live stream",
   type: "custom",
   render: (el) => buildPanel(el),
 });
@@ -1185,3 +1139,6 @@ api.addEventListener("rtc-stream-notification", (event) => {
     toast(severity, summary, detail || "");
   }
 });
+
+// Initial sync
+refreshServerBase();

@@ -10,6 +10,10 @@ except ImportError:  # pragma: no cover - PromptServer not available outside Com
     PromptServer = None  # type: ignore
 
 from ..server_manager import ensure_server_running, server_status, stop_server
+from rtc_stream.credentials_store import (
+    load_credentials_from_env,
+    persist_credentials_to_env,
+)
 
 
 LOGGER = logging.getLogger("rtc_stream.api")
@@ -95,6 +99,51 @@ if routes:
         except Exception as exc:  # pragma: no cover - runtime path
             LOGGER.error("RTC control action '%s' failed: %s", action, exc)
             return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+    def _public_credentials(state: Dict[str, Any]) -> Dict[str, Any]:
+        sources = state.get("sources", {})
+        return {
+            "api_url": state.get("api_url"),
+            "has_api_key": bool(state.get("api_key")),
+            "sources": {
+                "api_url": sources.get("api_url", "default"),
+                "api_key": sources.get("api_key", "missing"),
+            },
+        }
+
+    @routes.get("/rtc/credentials")
+    async def rtc_credentials_get(_request):
+        state = load_credentials_from_env()
+        return web.json_response({"success": True, "credentials": _public_credentials(state)})
+
+    @routes.post("/rtc/credentials")
+    async def rtc_credentials_post(request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+
+        api_url = payload.get("api_url")
+        api_key = payload.get("api_key")
+
+        if api_url is not None and not isinstance(api_url, str):
+            return web.json_response(
+                {"success": False, "error": "api_url must be a string"}, status=400
+            )
+        if api_key is not None and not isinstance(api_key, str):
+            return web.json_response(
+                {"success": False, "error": "api_key must be a string"}, status=400
+            )
+
+        try:
+            state = persist_credentials_to_env(api_url=api_url, api_key=api_key)
+        except ValueError as exc:  # pragma: no cover - validation error propagation
+            return web.json_response({"success": False, "error": str(exc)}, status=400)
+        except Exception as exc:  # pragma: no cover - runtime persistence failure
+            LOGGER.error("Failed to persist DayDream credentials: %s", exc)
+            return web.json_response({"success": False, "error": "Persistence failed"}, status=500)
+
+        return web.json_response({"success": True, "credentials": _public_credentials(state)})
 else:
     LOGGER.warning("PromptServer routes not available; RTC API control disabled")
 
