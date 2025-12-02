@@ -247,15 +247,46 @@ class StreamController:
         return self.status()
 
     async def _initial_remote_poll(self, api_url: str, api_key: str, stream_id: str) -> None:
+        """Poll immediately after stream creation to get initial gateway status."""
         loop = asyncio.get_running_loop()
-        LOGGER.info("Polling Daydream stream %s status in background...", stream_id)
+        LOGGER.info("Fetching initial Daydream stream %s status...", stream_id)
         payload = await loop.run_in_executor(
             None,
             lambda: poll_stream_status(api_url=api_url, api_key=api_key, stream_id=stream_id),
         )
         if payload:
-            self.state.remote_status = {"phase": "REMOTE_STATUS", **payload}
-            self.state.last_remote_check = time.time()
+            async with self._lock:
+                self.state.remote_status = {"phase": "REMOTE_STATUS", **payload}
+                self.state.last_remote_check = time.time()
+
+    async def _poll_remote_status_loop(self, api_url: str, api_key: str, stream_id: str) -> None:
+        """
+        Continuously poll Daydream API to keep gateway status (including whep_url) updated.
+        Runs in background after WHIP is established.
+        """
+        LOGGER.info("Starting background status polling for stream %s", stream_id)
+        # Poll immediately once, then every 5 seconds
+        await asyncio.sleep(0.5)  # Brief delay to let WHIP settle
+        
+        while True:
+            try:
+                loop = asyncio.get_running_loop()
+                payload = await loop.run_in_executor(
+                    None,
+                    lambda: poll_stream_status(api_url=api_url, api_key=api_key, stream_id=stream_id),
+                )
+                if payload:
+                    async with self._lock:
+                        self.state.remote_status = {"phase": "REMOTE_STATUS", **payload}
+                        self.state.last_remote_check = time.time()
+                    LOGGER.debug("Background poll updated remote status for stream %s", stream_id)
+            except asyncio.CancelledError:
+                LOGGER.info("Background status polling cancelled for stream %s", stream_id)
+                raise
+            except Exception as exc:
+                LOGGER.warning("Background remote poll failed for stream %s: %s", stream_id, exc)
+            
+            await asyncio.sleep(5.0)
 
     async def _refresh_remote_status(self) -> None:
         info = self.state.info
@@ -390,11 +421,22 @@ class StreamController:
         LOGGER.info("StreamController established WHIP session")
         self._set_phase_status("WHIP_ESTABLISHED", detail="WHIP session established")
 
+        # Start background status polling after WHIP is established
+        api_url, api_key = resolve_credentials(self.config.api_url, self.config.api_key)
+        poll_task = asyncio.create_task(
+            self._poll_remote_status_loop(api_url, api_key, info.stream_id)
+        )
+
         try:
             while True:
                 await asyncio.sleep(1)
                 self.state.frames_sent = track._pts
         finally:
+            poll_task.cancel()
+            try:
+                await poll_task
+            except asyncio.CancelledError:
+                pass
             await pc.close()
             self.state.running = False
 

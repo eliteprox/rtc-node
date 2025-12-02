@@ -220,29 +220,17 @@ class RTCStreamFrameOutput:
 class RTCStreamStatus:
     """
     ComfyUI node that retrieves stream status from the local API server.
-    Caches responses based on a configurable refresh interval.
+    Reads fast in-memory state updated by background polling.
     """
 
     def __init__(self):
         self._session = requests.Session()
-        self._last_refresh_time = 0.0
-        self._cached_status = None
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "optional": {
                 "stream_id": ("STRING", {"default": ""}),
-                "refresh_interval": (
-                    "FLOAT",
-                    {
-                        "default": 5.0,
-                        "min": 0.0,
-                        "max": 3600.0,
-                        "step": 0.1,
-                        "display": "number",
-                    },
-                ),
             },
         }
 
@@ -252,85 +240,46 @@ class RTCStreamStatus:
     CATEGORY = "RTC Stream"
 
     @classmethod
-    def IS_CHANGED(cls, stream_id="", refresh_interval=5.0, **kwargs):
+    def IS_CHANGED(cls, **kwargs):
         """
-        Return current timestamp divided by interval to trigger cache invalidation.
-        When interval passes, this value changes, causing ComfyUI to re-execute.
-        
-        The stream_id is included so status refreshes immediately when a new
-        stream starts or stops.
+        Always execute - no caching.
+        The local /status endpoint is fast since it reads in-memory state.
         """
-        normalized_stream = str(stream_id or "")
-        if refresh_interval <= 0:
-            return f"{normalized_stream}:{time.time()}"
+        return float("nan")
 
-        bucket = int(time.time() / refresh_interval)
-        return f"{normalized_stream}:{bucket}"
-
-    def get_status(self, stream_id: str = "", refresh_interval: float = 5.0):
+    def get_status(self, stream_id: str = ""):
         """
         Retrieve stream status from the local API server.
-        Uses time-based caching to avoid excessive API calls.
+        No caching - queries live state every execution.
         
         Args:
             stream_id: Optional input to create workflow dependency (not used in query)
-            refresh_interval: Seconds between status refreshes (0 = no cache)
         """
-        current_time = time.time()
-        
-        # Determine if refresh is needed
-        time_since_refresh = current_time - self._last_refresh_time
-        should_refresh = (
-            refresh_interval <= 0 or  # No cache
-            self._cached_status is None or  # No cache exists
-            time_since_refresh >= refresh_interval  # Interval expired
-        )
+        base_url = self._resolve_base_url()
+        if not base_url:
+            LOGGER.error("Local RTC API server unavailable for status check")
+            return self._empty_status()
 
-        if should_refresh:
-            # Fetch fresh status
-            base_url = self._resolve_base_url()
-            if not base_url:
-                LOGGER.error("Local RTC API server unavailable for status check")
-                return self._empty_status()
-
-            try:
-                response = self._session.get(f"{base_url}/status", timeout=10)
-                response.raise_for_status()
-                status = response.json()
-                
-                # Cache the result
-                self._cached_status = status
-                self._last_refresh_time = current_time
-                
-                LOGGER.debug("Fetched fresh stream status (interval=%.1fs)", refresh_interval)
-                
-            except requests.RequestException as exc:
-                LOGGER.error("Failed to fetch stream status: %s", exc)
-                # Use cached status if available, otherwise return empty
-                if self._cached_status is None:
-                    return self._empty_status()
-                status = self._cached_status
-        else:
-            # Use cached status
-            status = self._cached_status
-            LOGGER.debug(
-                "Using cached stream status (%.1fs since refresh, interval=%.1fs)",
-                time_since_refresh,
-                refresh_interval,
-            )
+        try:
+            response = self._session.get(f"{base_url}/status", timeout=2)
+            response.raise_for_status()
+            status = response.json()
+        except requests.RequestException as exc:
+            LOGGER.error("Failed to fetch stream status: %s", exc)
+            return self._empty_status()
 
         # Extract fields
         import json
         
         running = status.get("running", False)
-        stream_id = status.get("stream_id", "")
+        stream_id_out = status.get("stream_id", "")
         playback_id = status.get("playback_id", "")
         whep_url = self._extract_whep_url(status)
         frames_sent = int(status.get("frames_sent", 0))
         queue_depth_val = int(status.get("queue_depth", 0))
         status_json = json.dumps(status, indent=2)
 
-        return (running, stream_id, playback_id, whep_url, frames_sent, queue_depth_val, status_json)
+        return (running, stream_id_out, playback_id, whep_url, frames_sent, queue_depth_val, status_json)
 
     def _resolve_base_url(self) -> Optional[str]:
         """Resolve the local API server base URL."""
@@ -669,9 +618,23 @@ class StartRTCStream:
             return ("", "", "")
 
         if stop_stream:
-            stopped = self._stop_stream(base_url)
-            if stopped:
-                self._send_notification("info", "Stream Stopped", "Stop request sent")
+            # Check if stream is actually running before sending stop
+            is_running = False
+            try:
+                status_response = self._session.get(f"{base_url}/status", timeout=5)
+                status_response.raise_for_status()
+                status = status_response.json()
+                is_running = status.get("running", False)
+            except requests.RequestException as exc:
+                LOGGER.debug("Failed to check stream status before stop: %s", exc)
+            
+            if is_running:
+                stopped = self._stop_stream(base_url)
+                if stopped:
+                    self._send_notification("info", "Stream Stopped", "Stop request sent")
+            else:
+                LOGGER.debug("Stream already stopped; skipping stop request")
+            
             self._cache_key = None
             self._cached_result = None
             self._reset_stop_toggle(unique_id, extra_pnginfo)
