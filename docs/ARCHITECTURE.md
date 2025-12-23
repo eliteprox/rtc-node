@@ -1,145 +1,51 @@
-# RTC Node Architecture
+# RTC Node Architecture (BYOC-SDK)
 
-## StreamProcessor & Custom Nodes Communication
+This repo now uses a **browser-owned WebRTC session** (via `byoc-sdk`) instead of
+spawning a separate Python FastAPI + aiortc relay process.
+
+### New high-level flow
 
 ```mermaid
 graph TD
-    subgraph ComfyNodes["ComfyUI Custom Nodes"]
-        RTCOUT["RTCStreamFrameInput<br/>OUTPUT_NODE<br/>Push frames to stream"]
-        PIPECONF["PipelineConfigNode<br/>Generate stream config"]
-        LOCALCTL["LocalAPIServerController<br/>nodes/api/__init__.py"]
-    end
-    image.png
-    subgraph ServerManager["Server Manager Process"]
-        SM["server_manager.py<br/>ensure_server_running()"]
-        PROC["subprocess.Popen<br/>FastAPI Server Process"]
-    end
-    
-    subgraph FastAPI["FastAPI StreamProcessor Server - server/app.py"]
-        direction 
-        
-        subgraph HTTPRoutes["HTTP Routes"]
-            R_START["POST /start<br/>start_stream"]
-            R_STOP["POST /stop<br/>stop_stream"]
-            R_STATUS["GET /status<br/>get_status"]
-            R_FRAMES["POST /frames<br/>push_frame"]
-            R_CONFIG_GET["GET /config<br/>get_runtime_config"]
-            R_CONFIG_POST["POST /config<br/>update_runtime_config"]
-            R_CACHE["POST /pipeline/cache<br/>cache_pipeline_config"]
-            R_HEALTHZ["GET /healthz"]
-        end
-        
-        subgraph Controllers["Controllers"]
-            SCTL["StreamController<br/>Global Instance"]
-        end
-        
-        subgraph SharedState["Shared State"]
-            RUNTIME["runtime_config<br/>frame_rate, dimensions"]
-        end
-    end
-    
-    subgraph FrameBridge["Frame Bridge"]
-        BRIDGE["FRAME_BRIDGE<br/>AsyncIO Queue<br/>Max: 90 frames"]
-        UPLINK["frame_uplink.py<br/>deliver_tensor_frame()"]
-    end
-    
-    subgraph DaydreamAPI["Daydream API"]
-        DD_CREATE["POST /v1/streams<br/>Create stream"]
-        DD_STATUS["GET /v1/streams/:id/status<br/>Poll status"]
-        WHIP_EP["WHIP Endpoint<br/>WebRTC Ingest"]
-    end
-    
-    %% Layer 1: Custom Nodes
-    
-    %% Layer 2: Server Manager
-    RTCOUT -.->|"server_status()<br/>ensure_server_running()"| SM
-    LOCALCTL -->|"start/stop/restart"| SM
-    
-    %% Layer 3: FastAPI Process
-    SM -->|"subprocess.Popen"| PROC
-    PROC -.->|"Runs"| R_START
-    
-    %% Layer 4: Frame Flow
-    RTCOUT -->|"1. deliver_tensor_frame(image)"| UPLINK
-    UPLINK -->|"2a. HTTP Uplink<br/>POST with base64 PNG"| R_FRAMES
-    UPLINK -.->|"2b. Fallback<br/>enqueue locally"| BRIDGE
-    
-    %% Layer 5: Routes to Controller
-    R_FRAMES -->|"decode_frame()<br/>controller.enqueue_frame()"| SCTL
-    PIPECONF -.->|"Cache config locally<br/>or pass to start"| R_CACHE
-    R_CACHE -->|"controller.cache_pipeline_config()"| SCTL
-    LOCALCTL -->|"POST /start"| R_START
-    R_START -->|"controller.start(stream_name, pipeline_config)"| SCTL
-    LOCALCTL -->|"POST /stop"| R_STOP
-    R_STOP -->|"controller.stop()"| SCTL
-    LOCALCTL -->|"GET /status"| R_STATUS
-    R_STATUS -->|"controller.status_async()"| SCTL
-    
-    %% Layer 6: Bridge
-    SCTL -->|"Enqueue frame"| BRIDGE
-    SCTL -->|"FrameQueueTrack.recv()"| BRIDGE
-    
-    %% Layer 7: Daydream API
-    SCTL -->|"load_pipeline_config()"| SCTL
-    SCTL -->|"start_stream()"| DD_CREATE
-    DD_CREATE -->|"StreamInfo(whip_url, stream_id)"| SCTL
-    SCTL -->|"poll_stream_status()"| DD_STATUS
-    
-    %% Layer 8: WebRTC Streaming
-    SCTL -->|"RTCPeerConnection<br/>addTrack()"| WHIP_EP
-    
-    %% Config management
-    R_CONFIG_GET -->|"Read"| RUNTIME
-    R_CONFIG_POST -->|"Update & save"| RUNTIME
-    RUNTIME -.->|"Apply to"| SCTL
-    
-    %% Health check
-    R_HEALTHZ -->|"Check FRAME_BRIDGE"| BRIDGE
-    
-    %% Styling
-    classDef node fill:#e1f5ff,stroke:#01579b,stroke-width:2px
-    classDef route fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    classDef controller fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
-    classDef bridge fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    classDef external fill:#fce4ec,stroke:#880e4f,stroke-width:2px
-    classDef manager fill:#fff9c4,stroke:#f57f17,stroke-width:2px
-    
-    class RTCOUT,RTCIN,PIPECONF,LOCALCTL node
-    class R_START,R_STOP,R_STATUS,R_FRAMES,R_CONFIG_GET,R_CONFIG_POST,R_CACHE,R_HEALTHZ,R_WHEP_CONN,R_WHEP_DISC,R_WHEP_STAT,R_WHEP_FRAME route
-    class SCTL,WCTL controller
-    class BRIDGE,UPLINK bridge
-    class DD_CREATE,DD_STATUS,WHIP_EP,WHEP_EP external
-    class SM,PROC manager
+  subgraph ComfyUI["ComfyUI (single process)"]
+    NODES["Custom nodes<br/>Python"]
+    PS["PromptServer routes<br/>nodes/api/__init__.py"]
+    STORE["In-process mailbox<br/>rtc_stream/state_store.py"]
+  end
+
+  subgraph Browser["ComfyUI Frontend (browser)"]
+    UI["Sidebar + Preview UI<br/>nodes/js/*"]
+    BYOC["byoc-sdk<br/>(WHIP/WHEP)"]
+    CANVAS["Canvas captureStream()<br/>video ingress"]
+    VIDEO["Video element<br/>(WHEP output)"]
+  end
+
+  NODES -->|"POST frames"| STORE
+  STORE -->|"GET /rtc/frames/input"| UI
+  UI --> CANVAS
+  CANVAS -->|"WHIP publish"| BYOC
+  BYOC -->|"WHEP view"| VIDEO
+  VIDEO -->|"POST /rtc/frames/output"| STORE
+  STORE -->|"Nodes read latest output"| NODES
+  UI -->|"POST /rtc/session"| STORE
+  STORE -->|"GET /rtc/session"| UI
 ```
 
-## Component Details
+## Key components
 
-### Custom Nodes
+### Python
+- **`rtc_stream/state_store.py`**: the thread-safe mailbox holding input/output frames, desired config, and session info.
+- **`nodes/api/__init__.py`**: PromptServer endpoints:
+  - `GET/POST /rtc/frames/input`
+  - `GET/POST /rtc/frames/output`
+  - `GET/POST /rtc/pipeline`
+  - `GET/POST /rtc/session`
 
-#### RTCStreamFrameInput (Frame Output Node)
-```python
-Category: "RTC Stream"
-Display Name: "RTC Stream Frame Input"
-Inputs: IMAGE, enabled
-Outputs: None (OUTPUT_NODE)
-```
-**Function**: Pushes ComfyUI IMAGE tensors to the streaming pipeline
-- **Primary path**: HTTP uplink via `POST /frames` (base64 PNG)
-- **Fallback path**: Direct enqueue to `FRAME_BRIDGE` if server unavailable
-- Uses `deliver_tensor_frame()` which tries HTTP first, falls back to local queue
+### Browser
+- **`nodes/js/byoc-comfy-rtc.js`**: uses `byoc-sdk` to start/stop streams, publishes canvas frames to WHIP, views WHEP, and posts output frames back.
 
-#### RTCStreamFrameOutput (Frame Input Node)
-```python
-Category: "RTC Stream"
-Display Name: "RTC Stream Frame Output"
-Inputs: whep_url
-Outputs: IMAGE
-```
-**Function**: Pulls frames from WHEP subscriber
-- Auto-connects to WHEP if not already subscribed
-- Fetches latest frame via `GET /whep/frame`
-- Returns blank tensor if no frame available
-- Always executes (`IS_CHANGED` returns `True`)
+This design removes the need to manage a separate RTC server process: closing the UI naturally
+ends the stream and disposes WebRTC objects.
 
 #### StartRTCStream (Stream Initialization Node)
 ```python

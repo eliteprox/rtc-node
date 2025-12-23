@@ -2,7 +2,6 @@ import logging
 import sys
 
 from . import api, controlnet, frame_nodes, js, pipeline_config
-from .server_manager import ensure_server_running
 
 LOGGER = logging.getLogger("rtc_stream.nodes")
 
@@ -20,11 +19,6 @@ def _configure_rtc_logging():
 
 
 _configure_rtc_logging()
-
-try:
-    ensure_server_running()
-except Exception as exc:
-    LOGGER.error("Unable to start local API server: %s", exc)
 
 
 NODE_CLASS_MAPPINGS = {}

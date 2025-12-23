@@ -1,104 +1,116 @@
-import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from aiohttp import web
+try:
+    from aiohttp import web  # type: ignore
+except ImportError:  # pragma: no cover - aiohttp provided by ComfyUI runtime
+    web = None  # type: ignore
 
 try:
     from server import PromptServer
 except ImportError:  # pragma: no cover - PromptServer not available outside ComfyUI
     PromptServer = None  # type: ignore
 
-from ..server_manager import ensure_server_running, server_status, stop_server
-from rtc_stream.credentials_store import (
-    load_credentials_from_env,
-    persist_credentials_to_env,
-)
+from rtc_stream.credentials_store import load_credentials_from_env, persist_credentials_to_env
+from rtc_stream.state_store import RTC_STATE
 
 
 LOGGER = logging.getLogger("rtc_stream.api")
-routes = getattr(getattr(PromptServer, "instance", None), "routes", None)
-
-
-class LocalAPIServerController:
-    def __init__(self) -> None:
-        self._lock = asyncio.Lock()
-
-    async def start(self, host: Optional[str] = None, port: Optional[int] = None) -> bool:
-        async with self._lock:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                None, lambda: ensure_server_running(host_override=host, port_override=port)
-            )
-
-    async def stop(self) -> bool:
-        async with self._lock:
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, stop_server)
-
-    async def restart(self, host: Optional[str] = None, port: Optional[int] = None) -> bool:
-        await self.stop()
-        return await self.start(host=host, port=port)
-
-    def status(self) -> Dict[str, Any]:
-        return server_status()
-
-
-def _normalize_host_port(payload: Dict[str, Any]) -> (Optional[str], Optional[int]):
-    host = payload.get("host")
-    port = payload.get("port")
-
-    if isinstance(host, str):
-        host = host.strip() or None
-
-    if isinstance(port, str):
-        port = port.strip()
-        port = int(port) if port.isdigit() else None
-    elif isinstance(port, (int, float)):
-        port = int(port)
-    else:
-        port = None
-
-    return host, port
+routes = getattr(getattr(PromptServer, "instance", None), "routes", None) if web else None
 
 
 if routes:
-    controller = LocalAPIServerController()
+    # ---------------------------------------------------------------------
+    # BYOC <-> ComfyUI bridge endpoints (in-process; no subprocess)
+    # ---------------------------------------------------------------------
 
-    @routes.get("/rtc/control")
-    async def rtc_control_status(_request):
-        return web.json_response({"success": True, "status": controller.status()})
+    @routes.get("/rtc/session")
+    async def rtc_session_get(_request):
+        return web.json_response({"success": True, "session": RTC_STATE.get_session()})
 
-    @routes.post("/rtc/control")
-    async def rtc_control(request):
+    @routes.post("/rtc/session")
+    async def rtc_session_post(request):
         try:
             payload = await request.json()
         except Exception:
             payload = {}
+        patch = payload.get("session") if isinstance(payload.get("session"), dict) else payload
+        if not isinstance(patch, dict):
+            return web.json_response({"success": False, "error": "Invalid session payload"}, status=400)
+        session = RTC_STATE.update_session(patch)
+        return web.json_response({"success": True, "session": session})
 
-        action = (payload.get("action") or "status").lower()
-        settings = payload.get("settings") or {}
-        host, port = _normalize_host_port({**payload, **settings})
-
+    @routes.post("/rtc/session/clear")
+    async def rtc_session_clear(request):
         try:
-            if action == "status":
-                return web.json_response({"success": True, "status": controller.status()})
-            if action == "start":
-                success = await controller.start(host=host, port=port)
-                return web.json_response({"success": success, "status": controller.status()})
-            if action == "stop":
-                success = await controller.stop()
-                return web.json_response({"success": success, "status": controller.status()})
-            if action == "restart":
-                success = await controller.restart(host=host, port=port)
-                return web.json_response({"success": success, "status": controller.status()})
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        error = payload.get("error") if isinstance(payload.get("error"), str) else ""
+        session = RTC_STATE.clear_session(error=error)
+        return web.json_response({"success": True, "session": session})
 
-            return web.json_response(
-                {"success": False, "error": f"Invalid action '{action}'"}, status=400
-            )
-        except Exception as exc:  # pragma: no cover - runtime path
-            LOGGER.error("RTC control action '%s' failed: %s", action, exc)
-            return web.json_response({"success": False, "error": str(exc)}, status=500)
+    @routes.get("/rtc/pipeline")
+    async def rtc_pipeline_get(_request):
+        return web.json_response({"success": True, "config": RTC_STATE.get_desired_config()})
+
+    @routes.post("/rtc/pipeline")
+    async def rtc_pipeline_post(request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        config = RTC_STATE.set_desired_config(
+            stream_name=payload.get("stream_name"),
+            pipeline=payload.get("pipeline"),
+            pipeline_config=payload.get("pipeline_config") if isinstance(payload.get("pipeline_config"), dict) else None,
+            width=payload.get("width"),
+            height=payload.get("height"),
+            fps=payload.get("fps"),
+        )
+        return web.json_response({"success": True, "config": config})
+
+    @routes.get("/rtc/frames/input")
+    async def rtc_frames_input_get(_request):
+        frame_b64, meta, has_frame = RTC_STATE.get_input_frame()
+        return web.json_response({"success": True, "frame_b64": frame_b64, "has_frame": has_frame, "metadata": meta})
+
+    @routes.post("/rtc/frames/input")
+    async def rtc_frames_input_post(request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        frame_b64 = payload.get("frame_b64")
+        if not isinstance(frame_b64, str):
+            return web.json_response({"success": False, "error": "frame_b64 must be a string"}, status=400)
+        mime = payload.get("mime") if isinstance(payload.get("mime"), str) else "image/png"
+        info = RTC_STATE.set_input_frame(frame_b64, mime=mime)
+        return web.json_response({"success": True, "accepted": True, "info": info})
+
+    @routes.get("/rtc/frames/output")
+    async def rtc_frames_output_get(_request):
+        frame_b64, meta, has_frame = RTC_STATE.get_output_frame()
+        return web.json_response({"success": True, "frame_b64": frame_b64, "has_frame": has_frame, "metadata": meta})
+
+    @routes.post("/rtc/frames/output")
+    async def rtc_frames_output_post(request):
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        frame_b64 = payload.get("frame_b64")
+        if not isinstance(frame_b64, str):
+            return web.json_response({"success": False, "error": "frame_b64 must be a string"}, status=400)
+        mime = payload.get("mime") if isinstance(payload.get("mime"), str) else "image/png"
+        info = RTC_STATE.set_output_frame(frame_b64, mime=mime)
+        return web.json_response({"success": True, "accepted": True, "info": info})
 
     def _public_credentials(state: Dict[str, Any]) -> Dict[str, Any]:
         sources = state.get("sources", {})
@@ -145,5 +157,5 @@ if routes:
 
         return web.json_response({"success": True, "credentials": _public_credentials(state)})
 else:
-    LOGGER.warning("PromptServer routes not available; RTC API control disabled")
+    LOGGER.warning("PromptServer routes not available; RTC bridge endpoints disabled")
 

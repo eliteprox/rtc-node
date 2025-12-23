@@ -360,17 +360,11 @@ rtc-node/
 ├── nodes/                      # ComfyUI custom nodes
 │   ├── frame_nodes.py         # RTC Stream input/output nodes
 │   ├── pipeline_config.py     # Pipeline configuration node
-│   ├── server_manager.py      # FastAPI server lifecycle
 │   ├── api/                   # ComfyUI API endpoints
 │   └── js/                    # Frontend sidebar UI
-├── rtc_stream/                # Core streaming logic
-│   ├── controller.py          # WHIP streaming controller
-│   ├── whep_controller.py     # WHEP playback controller
-│   ├── frame_bridge.py        # Async frame queue
-│   ├── frame_uplink.py        # Frame delivery to API
-│   └── daydream.py           # Daydream API client
-├── server/                    # Standalone FastAPI server
-│   └── app.py                # HTTP routes and handlers
+├── rtc_stream/
+│   ├── state_store.py         # In-process mailbox (frames/config/session)
+│   └── credentials_store.py   # (optional) legacy credentials storage
 ├── docs/                      # Documentation
 │   ├── README.md             # Developer guide
 │   └── ARCHITECTURE.md       # System architecture
@@ -385,12 +379,11 @@ rtc-node/
 
 ## How It Works
 
-1. **Frame Output**: ComfyUI nodes send image tensors to the FastAPI server
-2. **Server Processing**: Frames are queued and converted to WebRTC format
-3. **WHIP Streaming**: Frames are sent to Daydream via WebRTC WHIP protocol
-4. **Processing**: Daydream processes frames with AI pipelines
-5. **WHEP Playback**: Processed frames are received back via WHEP protocol
-6. **Frame Input**: Frames are converted back to ComfyUI tensors
+1. **Frame Output**: ComfyUI nodes write the latest IMAGE into `/rtc/frames/input` (in-process mailbox)
+2. **Browser Publish**: The frontend polls input frames, draws them to a canvas, and publishes via `byoc-sdk` WHIP
+3. **Processing**: Gateway processes frames with the configured pipeline
+4. **Browser View**: The frontend views WHEP output via `byoc-sdk` and samples frames
+5. **Frame Input**: The frontend posts output frames into `/rtc/frames/output`, which nodes can read as IMAGE
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component diagrams and data flow.
 
@@ -516,9 +509,8 @@ For more help, see the troubleshooting section in [docs/README.md](docs/README.m
 ## Requirements
 
 - Python 3.10+
-- PyTorch 2.0+
-- aiortc 1.9.0+
-- FastAPI 0.115.0+
+- PyTorch (via ComfyUI)
+- No separate RTC subprocess server (WebRTC runs in the browser via `byoc-sdk`)
 - See `requirements.txt` for complete list
 
 ## License
@@ -544,8 +536,7 @@ Contributions are welcome! Please:
 ## Credits
 
 Built with:
-- [aiortc](https://github.com/aiortc/aiortc) - WebRTC implementation
-- [FastAPI](https://fastapi.tiangolo.com/) - API server framework
+- [byoc-sdk](https://github.com/muxionlabs/byoc-sdk) - WHIP/WHEP WebRTC + control-plane
 - [ComfyUI](https://github.com/comfyanonymous/ComfyUI) - Node-based UI framework
 - [Daydream.live](https://daydream.live) - Real-time AI streaming platform
 

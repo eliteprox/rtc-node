@@ -1,19 +1,19 @@
 import base64
 import io
-import json
 import logging
-import time
 from typing import Any, Dict, Optional
 
 import numpy as np
-import requests
-import torch
-from PIL import Image
+try:
+    import torch  # type: ignore
+except ImportError:  # pragma: no cover - provided by ComfyUI runtime
+    torch = None  # type: ignore
+try:
+    from PIL import Image  # type: ignore
+except ImportError:  # pragma: no cover - dependency provided at runtime
+    Image = None  # type: ignore
 
-from rtc_stream.frame_bridge import has_loop, queue_depth
-from rtc_stream.frame_uplink import deliver_tensor_frame
-from .server_manager import server_status
-from .settings_storage import DEFAULT_PORT
+from rtc_stream.state_store import RTC_STATE
 from .pipeline_config import hash_pipeline_config
 
 PromptServer = None
@@ -26,44 +26,9 @@ except ImportError:
 LOGGER = logging.getLogger("rtc_stream.nodes")
 
 
-def query_status_api(stream_id: str = "") -> Dict[str, Any]:
-    """
-    Query the RTC stream status from the local API server.
-
-    Args:
-        stream_id: Optional stream identifier (for future use, currently unused)
-
-    Returns:
-        Dict containing status information, or empty dict on failure
-    """
-    try:
-        # Get server status
-        status = server_status()
-        if not status.get("running"):
-            LOGGER.error("Local RTC API server is not running")
-            return {}
-
-        host = status.get("host") or "127.0.0.1"
-        port = status.get("port") or DEFAULT_PORT
-        base_url = f"http://{host}:{port}"
-
-        # Make API request
-        session = requests.Session()
-        response = session.get(f"{base_url}/status", timeout=10)
-        response.raise_for_status()
-        return response.json()
-
-    except requests.RequestException as exc:
-        LOGGER.error("Failed to query RTC status API: %s", exc)
-        return {}
-    except Exception as exc:
-        LOGGER.error("Unexpected error querying RTC status: %s", exc)
-        return {}
-
-
 class RTCStreamFrameInput:
     """
-    ComfyUI output node that enqueues frame tensors into the streaming pipeline.
+    ComfyUI output node that makes the latest IMAGE available to the browser-side publisher.
     """
 
     @classmethod
@@ -88,29 +53,24 @@ class RTCStreamFrameInput:
         return True
 
     @staticmethod
-    def push_frame(image: torch.Tensor, enabled: bool = True):
+    def push_frame(image, enabled: bool = True):
         if enabled:
-            success, mode = deliver_tensor_frame(image)
-            if success and mode == "local":
-                LOGGER.debug(
-                    "RTC stream enqueued frame (loop_ready=%s depth=%s)",
-                    has_loop(),
-                    queue_depth(),
-                )
-            elif success:
-                LOGGER.debug("RTC stream uploaded frame via HTTP uplink")
-            else:
-                LOGGER.warning("Failed to deliver frame via HTTP uplink")
+            if torch is None:
+                LOGGER.error("torch is not available; cannot push frame")
+                return ()
+            frame_b64 = _tensor_to_png_b64(image)
+            if frame_b64:
+                RTC_STATE.set_input_frame(frame_b64)
         return ()
 
 
 class RTCStreamFrameOutput:
     """
-    ComfyUI node that retrieves the latest frame from the WHEP subscriber.
+    ComfyUI node that retrieves the latest browser-captured output frame.
     """
 
     def __init__(self):
-        self._session = requests.Session()
+        pass
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -132,73 +92,21 @@ class RTCStreamFrameOutput:
         return True
 
     def pull_frame(self, whep_url: str):
-        base_url = self._resolve_base_url()
-        if not base_url:
-            LOGGER.error("Local RTC API server unavailable; returning blank frame")
-            return (self._blank_tensor(), whep_url)
-
-        status = self._get_whep_status(base_url)
-        if status is None:
-            return (self._blank_tensor(), whep_url)
-
-        should_connect = not (status.get("connected") or status.get("connecting"))
-        if should_connect:
-            if whep_url:
-                self._connect_whep(base_url, whep_url)
-            else:
-                LOGGER.warning("WHEP subscriber idle but no whep_url provided")
-
-        frame_payload = self._fetch_frame(base_url)
-        if not frame_payload:
-            return (self._blank_tensor(), whep_url)
-
-        frame_b64 = frame_payload.get("frame_b64") or ""
+        if torch is None:
+            LOGGER.error("torch is not available; cannot decode frame to IMAGE")
+            return (None, whep_url)
+        frame_b64, _meta, has_frame = RTC_STATE.get_output_frame()
+        session = RTC_STATE.get_session()
+        effective_whep = session.get("whep_url") or whep_url
+        if not has_frame:
+            return (self._blank_tensor(), effective_whep)
         tensor = self._b64_to_tensor(frame_b64)
         if tensor is None:
-            return (self._blank_tensor(), whep_url)
-        return (tensor, whep_url)
-
-    def _resolve_base_url(self) -> Optional[str]:
-        status = server_status()
-        if not status.get("running"):
-            LOGGER.error("Local RTC API server is not running")
-            return None
-        host = status.get("host") or "127.0.0.1"
-        port = status.get("port") or DEFAULT_PORT
-        return f"http://{host}:{port}"
-
-    def _get_whep_status(self, base_url: str) -> Optional[Dict[str, Any]]:
-        try:
-            response = self._session.get(f"{base_url}/whep/status", timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to query WHEP status: %s", exc)
-            return None
-
-    def _connect_whep(self, base_url: str, whep_url: str) -> None:
-        try:
-            response = self._session.post(
-                f"{base_url}/whep/connect",
-                json={"whep_url": whep_url},
-                timeout=5,
-            )
-            response.raise_for_status()
-            LOGGER.info("Requested WHEP subscription for %s", whep_url)
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to request WHEP connection: %s", exc)
-
-    def _fetch_frame(self, base_url: str) -> Optional[Dict[str, Any]]:
-        try:
-            response = self._session.get(f"{base_url}/whep/frame", timeout=5)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to fetch WHEP frame: %s", exc)
-            return None
+            return (self._blank_tensor(), effective_whep)
+        return (tensor, effective_whep)
 
     @staticmethod
-    def _b64_to_tensor(frame_b64: str) -> Optional[torch.Tensor]:
+    def _b64_to_tensor(frame_b64: str):
         if not frame_b64:
             return None
         try:
@@ -212,7 +120,9 @@ class RTCStreamFrameOutput:
             return None
 
     @staticmethod
-    def _blank_tensor(width: int = 1280, height: int = 720) -> torch.Tensor:
+    def _blank_tensor(width: int = 1280, height: int = 720):
+        if torch is None:
+            return None
         blank = torch.zeros((height, width, 3), dtype=torch.float32)
         return blank.unsqueeze(0)
 
@@ -224,7 +134,7 @@ class RTCStreamStatus:
     """
 
     def __init__(self):
-        self._session = requests.Session()
+        pass
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -255,41 +165,31 @@ class RTCStreamStatus:
         Args:
             stream_id: Optional input to create workflow dependency (not used in query)
         """
-        base_url = self._resolve_base_url()
-        if not base_url:
-            LOGGER.error("Local RTC API server unavailable for status check")
-            return self._empty_status()
-
-        try:
-            response = self._session.get(f"{base_url}/status", timeout=2)
-            response.raise_for_status()
-            status = response.json()
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to fetch stream status: %s", exc)
-            return self._empty_status()
-
-        # Extract fields
         import json
-        
-        running = status.get("running", False)
-        stream_id_out = status.get("stream_id", "")
-        playback_id = status.get("playback_id", "")
-        whep_url = self._extract_whep_url(status)
-        frames_sent = int(status.get("frames_sent", 0))
-        queue_depth_val = int(status.get("queue_depth", 0))
+
+        session = RTC_STATE.get_session()
+        running = bool(session.get("running"))
+        stream_id_out = session.get("stream_id") or ""
+        playback_id = session.get("playback_url") or ""
+        whep_url = session.get("whep_url") or ""
+        _in_b64, in_meta, _ = RTC_STATE.get_input_frame()
+        _out_b64, out_meta, _ = RTC_STATE.get_output_frame()
+        status = {
+            "running": running,
+            "stream_id": stream_id_out,
+            "playback_id": playback_id,
+            "whip_url": session.get("whip_url") or "",
+            "whep_url": whep_url,
+            "frame_in": in_meta,
+            "frame_out": out_meta,
+            "session": session,
+            "desired": RTC_STATE.get_desired_config(),
+        }
+
+        frames_sent = int(in_meta.get("sequence", 0))
+        queue_depth_val = 0
         status_json = json.dumps(status, indent=2)
-
         return (running, stream_id_out, playback_id, whep_url, frames_sent, queue_depth_val, status_json)
-
-    def _resolve_base_url(self) -> Optional[str]:
-        """Resolve the local API server base URL."""
-        status = server_status()
-        if not status.get("running"):
-            LOGGER.error("Local RTC API server is not running")
-            return None
-        host = status.get("host") or "127.0.0.1"
-        port = status.get("port") or DEFAULT_PORT
-        return f"http://{host}:{port}"
 
     def _empty_status(self):
         """Return empty status values."""
@@ -363,7 +263,7 @@ class UpdateRTCStream:
     """
 
     def __init__(self):
-        self._session = requests.Session()
+        pass
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -401,79 +301,13 @@ class UpdateRTCStream:
             LOGGER.debug("UpdateRTCStream disabled; skipping update")
             return ()
 
-        # Resolve the API server base URL
-        base_url = self._resolve_base_url()
-        if not base_url:
-            LOGGER.error("Local RTC API server unavailable")
-            self._send_notification("error", "Update Failed", "API server unavailable")
-            return ()
-
-        stream_id = ""
-        try:
-            status_response = self._session.get(f"{base_url}/status", timeout=10)
-            status_response.raise_for_status()
-            status_data = status_response.json()
-            stream_id = status_data.get("stream_id", "")
-            running = bool(status_data.get("running"))
-        except requests.RequestException as exc:
-            LOGGER.warning("Failed to query stream status: %s", exc)
-            running = False
-
-        if not running or not stream_id:
-            LOGGER.warning("No running stream available for update")
-            self._send_notification(
-                "warn",
-                "Update Skipped",
-                "No active stream found; start a stream first",
-            )
-            return ()
-
-        # Send the update request
-        try:
-            payload = {"pipeline_config": pipeline_config}
-            LOGGER.info("Updating stream %s with new pipeline config", stream_id)
-            response = self._session.patch(
-                f"{base_url}/pipeline",
-                json=payload,
-                timeout=30,
-            )
-            response.raise_for_status()
-            response.json()
-
-            LOGGER.info("Stream %s updated successfully", stream_id)
-
-            self._send_notification(
-                "success",
-                "Pipeline Updated",
-                f"Stream {stream_id[:12]}... parameters updated",
-            )
-
-            return ()
-
-        except requests.RequestException as exc:
-            error_msg = str(exc)
-            LOGGER.error("Failed to update stream: %s", error_msg)
-            
-            # Check for specific error conditions
-            if "409" in error_msg:
-                self._send_notification("warn", "No Active Stream", 
-                                       "Start a stream before updating parameters")
-            elif "405" in error_msg:
-                self._send_notification("warn", "Update Not Supported", 
-                                       "PATCH endpoint not available. Stop and restart stream instead.")
-            else:
-                self._send_notification("error", "Update Failed", error_msg)
-            return ()
-
-    def _resolve_base_url(self) -> Optional[str]:
-        """Resolve the local API server base URL."""
-        status = server_status()
-        if not status.get("running"):
-            LOGGER.error("Local RTC API server is not running")
-            return None
-        host = status.get("host") or "127.0.0.1"
-        port = status.get("port") or DEFAULT_PORT
-        return f"http://{host}:{port}"
+        desired = RTC_STATE.set_desired_config(pipeline_config=pipeline_config)
+        self._send_notification(
+            "info",
+            "Pipeline Updated (pending)",
+            f"Browser will apply next update (pipeline={desired.get('pipeline','')})",
+        )
+        return ()
 
     def _send_notification(self, severity: str, summary: str, detail: str):
         """Send a notification to the ComfyUI frontend."""
@@ -503,7 +337,6 @@ class StartRTCStream:
     """
 
     def __init__(self):
-        self._session = requests.Session()
         self._cache_key = None
         self._cached_result = None
 
@@ -590,8 +423,8 @@ class StartRTCStream:
         extra_pnginfo=None,
     ):
         """
-        Start a stream with the given pipeline configuration.
-        This method is called by ComfyUI and handles the actual stream creation.
+        Publish the desired stream configuration for the browser to start via BYOC-SDK.
+        The actual WHIP/WHEP session runs in the ComfyUI frontend (browser).
         """
         # If disabled and not stopping, return cached or empty
         if not enabled and not stop_stream:
@@ -610,112 +443,35 @@ class StartRTCStream:
             LOGGER.info("Using cached stream (stream_id=%s)", self._cached_result[0])
             return self._cached_result
 
-        base_url = self._resolve_base_url()
-        if not base_url:
-            LOGGER.error("Local RTC API server unavailable")
-            if stop_stream:
-                self._reset_stop_toggle(unique_id, extra_pnginfo)
-            return ("", "", "")
-
         if stop_stream:
-            # Check if stream is actually running before sending stop
-            is_running = False
-            try:
-                status_response = self._session.get(f"{base_url}/status", timeout=5)
-                status_response.raise_for_status()
-                status = status_response.json()
-                is_running = status.get("running", False)
-            except requests.RequestException as exc:
-                LOGGER.debug("Failed to check stream status before stop: %s", exc)
-            
-            if is_running:
-                stopped = self._stop_stream(base_url)
-                if stopped:
-                    self._send_notification("info", "Stream Stopped", "Stop request sent")
-            else:
-                LOGGER.debug("Stream already stopped; skipping stop request")
-            
+            RTC_STATE.clear_session()
             self._cache_key = None
             self._cached_result = None
             self._reset_stop_toggle(unique_id, extra_pnginfo)
             return ("", "", "")
 
-        # Check if a stream is already running
-        try:
-            status_response = self._session.get(f"{base_url}/status", timeout=10)
-            status_response.raise_for_status()
-            status = status_response.json()
-
-            if status.get("running"):
-                stream_id = status.get("stream_id", "")
-                playback_id = status.get("playback_id", "")
-                whip_url = status.get("whip_url", "")
-
-                if stream_id:
-                    LOGGER.info("Stream already running (stream_id=%s), reusing", stream_id)
-                    result = (stream_id, playback_id, whip_url)
-                    self._cache_key = current_cache_key
-                    self._cached_result = result
-                    self._send_notification(
-                        "info",
-                        "Stream Already Running",
-                        f"Reusing existing stream: {stream_id[:12]}...",
-                    )
-                    return result
-        except requests.RequestException as exc:
-            LOGGER.warning("Failed to check stream status: %s", exc)
-
-        # Start a new stream
-        try:
-            payload = {
-                "stream_name": stream_name or "",
-                "pipeline_config": pipeline_config,
-                "frame_rate": fps,
-                "frame_width": width,
-                "frame_height": height,
-            }
-
-            LOGGER.info("Starting new stream with config: %s (fps=%d, %dx%d)", stream_name or "default", fps, width, height)
-            response = self._session.post(
-                f"{base_url}/start",
-                json=payload,
-                timeout=30,
-            )
-            response.raise_for_status()
-            result_data = response.json()
-
-            stream_id = result_data.get("stream_id", "")
-            playback_id = result_data.get("playback_id", "")
-            whip_url = result_data.get("whip_url", "")
-
-            LOGGER.info("Stream started successfully (stream_id=%s)", stream_id)
-
-            result = (stream_id, playback_id, whip_url)
-            self._cache_key = current_cache_key
-            self._cached_result = result
-
-            self._send_notification(
-                "success",
-                "Stream Started",
-                f"Stream ID: {stream_id[:12]}...",
-            )
-
-            return result
-
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to start stream: %s", exc)
-            self._send_notification("error", "Stream Start Failed", str(exc))
-            return ("", "", "")
-
-    def _resolve_base_url(self) -> Optional[str]:
-        """Resolve the local API server base URL."""
-        status = server_status()
-        if not status.get("running"):
-            LOGGER.error("Local RTC API server is not running")
-            return None
-        host = status.get("host") or "127.0.0.1"
-        port = status.get("port") or DEFAULT_PORT
-        return f"http://{host}:{port}"
+        # Publish desired config for the browser publisher.
+        RTC_STATE.set_desired_config(
+            stream_name=stream_name or "comfyui-livestream",
+            pipeline=pipeline_config.get("pipeline") if isinstance(pipeline_config, dict) else None,
+            pipeline_config=pipeline_config,
+            width=width,
+            height=height,
+            fps=fps,
+        )
+        session = RTC_STATE.get_session()
+        stream_id = session.get("stream_id") or ""
+        playback_id = session.get("playback_url") or ""
+        whip_url = session.get("whip_url") or ""
+        result = (stream_id, playback_id, whip_url)
+        self._cache_key = current_cache_key
+        self._cached_result = result
+        self._send_notification(
+            "info",
+            "Stream Requested",
+            "Open the Daydream Live sidebar (browser) and click Start Stream.",
+        )
+        return result
 
     def _send_notification(self, severity: str, summary: str, detail: str):
         """Send a notification to the ComfyUI frontend."""
@@ -737,17 +493,6 @@ class StartRTCStream:
         except Exception as exc:
             LOGGER.debug("Failed to send notification: %s", exc)
 
-    def _stop_stream(self, base_url: str) -> bool:
-        try:
-            response = self._session.post(f"{base_url}/stop", timeout=15)
-            response.raise_for_status()
-            LOGGER.info("Stop request sent successfully")
-            return True
-        except requests.RequestException as exc:
-            LOGGER.error("Failed to stop stream: %s", exc)
-            self._send_notification("error", "Stream Stop Failed", str(exc))
-            return False
-
     def _reset_stop_toggle(self, unique_id, extra_pnginfo) -> None:
         if unique_id is None or not extra_pnginfo:
             return
@@ -766,6 +511,27 @@ class StartRTCStream:
             return
         if widgets[1]:
             widgets[1] = False
+
+def _tensor_to_png_b64(image) -> str:
+    try:
+        if Image is None:
+            return ""
+        tensor = image
+        if hasattr(tensor, "detach"):
+            tensor = tensor.detach()
+        if hasattr(tensor, "cpu"):
+            tensor = tensor.cpu()
+        arr = tensor.numpy()
+        if arr.ndim == 4:
+            arr = arr[0]
+        arr = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+        pil = Image.fromarray(arr, mode="RGB")
+        buf = io.BytesIO()
+        pil.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as exc:  # pragma: no cover
+        LOGGER.error("Failed to encode IMAGE tensor to PNG: %s", exc)
+        return ""
 
 
 

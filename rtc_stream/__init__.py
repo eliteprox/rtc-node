@@ -1,9 +1,9 @@
 """
 RTC streaming package for ComfyUI custom nodes.
 
-This package exposes helpers for pushing frames from custom nodes into
-the streaming controller's shared queue.
+This package exposes the in-process state store used to bridge
+ComfyUI custom nodes <-> browser BYOC-SDK WebRTC sessions.
 """
 
-from .frame_bridge import FRAME_BRIDGE, enqueue_array_frame, enqueue_tensor_frame, has_loop  # noqa: F401
+from .state_store import RTC_STATE  # noqa: F401
 
