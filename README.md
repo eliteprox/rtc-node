@@ -419,6 +419,62 @@ curl -X POST http://127.0.0.1:8895/config \
 
 Create pipeline configurations using the **Pipeline Config Node** in ComfyUI, or manually edit `pipeline_config.json`.
 
+### ControlNet Configuration
+
+**Model-Specific ControlNet Nodes**:
+
+For the best experience, use the model-specific ControlNet nodes which show only valid options:
+
+| Node | Model Family | Available ControlNets |
+|------|--------------|----------------------|
+| **Daydream ControlNet SD-Turbo** | `stabilityai/sd-turbo` | OpenPose, HED, Canny, Depth, Color |
+| **Daydream ControlNet SDXL** | `stabilityai/sdxl-turbo` | Depth, Canny, Tile |
+| **Daydream ControlNet (All)** | All models | All ControlNets (legacy) |
+
+**SDXL ControlNets** (from [Daydream SDXL docs](https://docs.daydream.live/parameters/SDXL)):
+- `xinsir/controlnet-depth-sdxl-1.0` - High-resolution depth guidance (`depth_tensorrt`)
+- `xinsir/controlnet-canny-sdxl-1.0` - SDXL-optimized edge detection (`canny`)
+- `xinsir/controlnet-tile-sdxl-1.0` - Tile-based texture control (`feedback` preprocessor)
+
+**Chaining ControlNets** (no limit):
+```
+[ControlNet 1] → [ControlNet 2] → [ControlNet 3] → [PipelineConfig]
+   Depth              Canny           Tile            (controlnets input)
+```
+
+**How It Works**:
+1. Each ControlNet node has an optional `controlnets` input for chaining
+2. Connect the output of one ControlNet to the `controlnets` input of another
+3. The final ControlNet outputs a list containing all chained configs
+4. Connect the output to PipelineConfig's single `controlnets` input
+
+**Why Model-Specific Nodes?**
+- Only shows valid model/preprocessor combinations
+- Correct default conditioning scales for each model family
+- Cleaner dropdown menus with fewer options
+- Prevents selecting incompatible options at design time
+
+**Link Type**:
+
+All ControlNet nodes use the same `CONTROLNET_CONFIG` link type, so any node can connect to any other. Model compatibility is validated at runtime by PipelineConfig when you queue the workflow.
+
+**Backward Compatibility**:
+The generic "Daydream ControlNet (All)" node remains available for existing workflows.
+
+**Image / Latent Processing Blocks**:
+
+Daydream's Create/Update Stream APIs accept optional `image_preprocessing`,
+`image_postprocessing`, `latent_preprocessing`, and `latent_postprocessing`
+sections that contain ordered processor lists (e.g., blur, canny, latent_feedback).[^daydream-update-stream]
+
+- **Daydream Processor** node creates individual processor entries (type, enabled flag, params JSON) and supports chaining to build ordered lists.
+- **Daydream Processing Block** node wraps a processor chain into a payload fragment consumable by `PipelineConfig` inputs (`image_preprocessing`, `image_postprocessing`, `latent_preprocessing`, `latent_postprocessing`).
+- Validation ensures at least one processor is supplied when the block is enabled, matching Daydream's schema.
+
+Connect these blocks into the corresponding inputs on `PipelineConfigNode` to mirror the API structure without writing raw JSON.
+
+[^daydream-update-stream]: Daydream Update Stream API reference – `image_*` and `latent_*` processing blocks.[https://docs.daydream.live/api-reference/update-stream](https://docs.daydream.live/api-reference/update-stream)
+
 #### Understanding Node Caching Behavior
 
 The RTC Stream nodes leverage ComfyUI's built-in caching system for optimal performance:

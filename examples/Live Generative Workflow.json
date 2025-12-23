@@ -1,0 +1,553 @@
+{
+  "id": "2ecfe50b-5447-4fa5-93d7-9485ff71bba9",
+  "revision": 0,
+  "last_node_id": 160,
+  "last_link_id": 173,
+  "nodes": [
+    {
+      "id": 112,
+      "type": "RTCStreamFrameInput",
+      "pos": [
+        1873.5336300554852,
+        185.0380433025175
+      ],
+      "size": [
+        324,
+        172
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 159
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "RTCStreamFrameInput",
+        "aux_id": "eliteprox/rtc-node",
+        "ver": "753fa608acf6bd4904c4982cc1b057e1b43ed12d"
+      },
+      "widgets_values": [
+        true
+      ]
+    },
+    {
+      "id": 61,
+      "type": "UpdateRTCStream",
+      "pos": [
+        538.4678263701842,
+        -76.93279041109
+      ],
+      "size": [
+        324,
+        172
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pipeline_config",
+          "type": "PIPELINE_CONFIG",
+          "link": 172
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "UpdateRTCStream",
+        "aux_id": "eliteprox/rtc-node",
+        "ver": "39cf087061d25337a60ef31d3ce9b3fa055aa01b"
+      },
+      "widgets_values": [
+        false
+      ]
+    },
+    {
+      "id": 118,
+      "type": "StartRTCStream",
+      "pos": [
+        397.61897573541864,
+        171.44934060308515
+      ],
+      "size": [
+        324,
+        414
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pipeline_config",
+          "type": "PIPELINE_CONFIG",
+          "link": 173
+        }
+      ],
+      "outputs": [
+        {
+          "name": "stream_id",
+          "type": "STRING",
+          "links": [
+            165
+          ]
+        },
+        {
+          "name": "playback_id",
+          "type": "STRING",
+          "links": []
+        },
+        {
+          "name": "whip_url",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "whep_url",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "StartRTCStream",
+        "aux_id": "eliteprox/rtc-node",
+        "ver": "753fa608acf6bd4904c4982cc1b057e1b43ed12d"
+      },
+      "widgets_values": [
+        "comfyui-livestream",
+        30,
+        512,
+        512,
+        false,
+        false
+      ]
+    },
+    {
+      "id": 133,
+      "type": "LoadImage",
+      "pos": [
+        1428.8396167193043,
+        40.036359341030845
+      ],
+      "size": [
+        274.078125,
+        376.03125
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.76"
+      },
+      "widgets_values": [
+        "livepeer.jpg",
+        "image"
+      ]
+    },
+    {
+      "id": 144,
+      "type": "PreviewAny",
+      "pos": [
+        928.8855314251152,
+        537.5149036485864
+      ],
+      "size": [
+        225,
+        172
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 166
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewAny",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.76"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 150,
+      "type": "WebcamCapture",
+      "pos": [
+        1472.0957291778002,
+        211.19398784536412
+      ],
+      "size": [
+        270,
+        371
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            159
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "WebcamCapture",
+        "cnr_id": "comfy-core",
+        "ver": "0.3.76"
+      },
+      "widgets_values": [
+        "",
+        512,
+        512,
+        true,
+        "capture"
+      ]
+    },
+    {
+      "id": 154,
+      "type": "RTCStreamStatus",
+      "pos": [
+        825.9957625713557,
+        220.92271072866492
+      ],
+      "size": [
+        270,
+        280
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "stream_id",
+          "shape": 7,
+          "type": "STRING",
+          "widget": {
+            "name": "stream_id"
+          },
+          "link": 165
+        }
+      ],
+      "outputs": [
+        {
+          "name": "running",
+          "type": "BOOLEAN",
+          "links": null
+        },
+        {
+          "name": "stream_id",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "playback_id",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "playback_url",
+          "type": "STRING",
+          "links": [
+            166
+          ]
+        },
+        {
+          "name": "whep_url",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "frames_sent",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "queue_depth",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "status_json",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RTCStreamStatus",
+        "aux_id": "eliteprox/rtc-node",
+        "ver": "52e1126dc93d390657354cfd5cde83c064744ad7"
+      },
+      "widgets_values": [
+        ""
+      ]
+    },
+    {
+      "id": 159,
+      "type": "RTCStreamPipelineConfig",
+      "pos": [
+        -124.996820517998,
+        -103.00430035226736
+      ],
+      "size": [
+        400,
+        1260
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "controlnets",
+          "shape": 7,
+          "type": "CONTROLNET_CONFIG",
+          "link": 171
+        },
+        {
+          "name": "image_preprocessing",
+          "shape": 7,
+          "type": "PREPROCESSING_CONFIG",
+          "link": null
+        },
+        {
+          "name": "image_postprocessing",
+          "shape": 7,
+          "type": "PREPROCESSING_CONFIG",
+          "link": null
+        },
+        {
+          "name": "latent_preprocessing",
+          "shape": 7,
+          "type": "PREPROCESSING_CONFIG",
+          "link": null
+        },
+        {
+          "name": "latent_postprocessing",
+          "shape": 7,
+          "type": "PREPROCESSING_CONFIG",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pipeline_config",
+          "type": "PIPELINE_CONFIG",
+          "links": [
+            172,
+            173
+          ]
+        },
+        {
+          "name": "config_json",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RTCStreamPipelineConfig"
+      },
+      "widgets_values": [
+        "streamdiffusion",
+        "stabilityai/sd-turbo",
+        "A beautiful landscape",
+        7.5,
+        1,
+        50,
+        704,
+        704,
+        2323101318,
+        "randomize",
+        "",
+        "linear",
+        "linear",
+        true,
+        true,
+        true,
+        true,
+        "",
+        "{}",
+        "tensorrt",
+        true,
+        true,
+        true,
+        0.5,
+        10,
+        "0",
+        false,
+        "none",
+        0.5,
+        "linear",
+        ""
+      ]
+    },
+    {
+      "id": 160,
+      "type": "RTCStreamControlNetSD21",
+      "pos": [
+        -734.5948205179972,
+        12.792679338284245
+      ],
+      "size": [
+        400,
+        338
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "controlnets",
+          "shape": 7,
+          "type": "CONTROLNET_CONFIG",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "controlnets",
+          "type": "CONTROLNET_CONFIG",
+          "links": [
+            171
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RTCStreamControlNetSD21"
+      },
+      "widgets_values": [
+        "thibaud/controlnet-sd21-depth-diffusers",
+        "depth_tensorrt",
+        0.711,
+        0,
+        1,
+        "{}",
+        true
+      ]
+    }
+  ],
+  "links": [
+    [
+      159,
+      150,
+      0,
+      112,
+      0,
+      "IMAGE"
+    ],
+    [
+      165,
+      118,
+      0,
+      154,
+      0,
+      "STRING"
+    ],
+    [
+      166,
+      154,
+      3,
+      144,
+      0,
+      "*"
+    ],
+    [
+      171,
+      160,
+      0,
+      159,
+      0,
+      "CONTROLNET_CONFIG"
+    ],
+    [
+      172,
+      159,
+      0,
+      61,
+      0,
+      "PIPELINE_CONFIG"
+    ],
+    [
+      173,
+      159,
+      0,
+      118,
+      0,
+      "PIPELINE_CONFIG"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 2,
+      "title": "Stream Control",
+      "bounding": [
+        -156.60765777699532,
+        -173.23364033032624,
+        1407.5228199939895,
+        1278.8793537610823
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "Group",
+      "bounding": [
+        1316.1779091620115,
+        -89.20194125784724,
+        912.8362721987288,
+        696.0671999999996
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.751314800901579,
+      "offset": [
+        1074.1329205179989,
+        271.1096207380095
+      ]
+    },
+    "workflowRendererVersion": "Vue",
+    "frontendVersion": "1.33.14"
+  },
+  "version": 0.4
+}

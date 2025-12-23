@@ -96,6 +96,48 @@ CONTROLNET_REGISTRY: Dict[str, Dict[str, Any]] = {
             "streamdiffusion": ("stabilityai/sd-turbo",),
         },
     },
+    "xinsir/controlnet-depth-sdxl-1.0": {
+        "label": "SDXL Depth",
+        "preprocessors": ("depth_tensorrt",),
+        "default_preprocessor": "depth_tensorrt",
+        "preprocessor_defaults": {
+            "depth_tensorrt": {
+                "conditioning_scale": 0.4,
+                "preprocessor_params": {},
+            }
+        },
+        "pipelines": {
+            "streamdiffusion": ("stabilityai/sdxl-turbo",),
+        },
+    },
+    "xinsir/controlnet-canny-sdxl-1.0": {
+        "label": "SDXL Canny",
+        "preprocessors": ("canny",),
+        "default_preprocessor": "canny",
+        "preprocessor_defaults": {
+            "canny": {
+                "conditioning_scale": 0.1,
+                "preprocessor_params": {},
+            }
+        },
+        "pipelines": {
+            "streamdiffusion": ("stabilityai/sdxl-turbo",),
+        },
+    },
+    "xinsir/controlnet-tile-sdxl-1.0": {
+        "label": "SDXL Tile",
+        "preprocessors": ("feedback",),
+        "default_preprocessor": "feedback",
+        "preprocessor_defaults": {
+            "feedback": {
+                "conditioning_scale": 0.1,
+                "preprocessor_params": {},
+            }
+        },
+        "pipelines": {
+            "streamdiffusion": ("stabilityai/sdxl-turbo",),
+        },
+    },
 }
 
 # Pipeline -> model registry with control net compatibility baked in.
@@ -113,6 +155,16 @@ PIPELINE_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
                     "thibaud/controlnet-sd21-canny-diffusers",
                     "thibaud/controlnet-sd21-depth-diffusers",
                     "thibaud/controlnet-sd21-color-diffusers",
+                ),
+            },
+            "stabilityai/sdxl-turbo": {
+                "label": "SDXL Turbo",
+                "default_width": 512,
+                "default_height": 512,
+                "supported_controlnets": (
+                    "xinsir/controlnet-depth-sdxl-1.0",
+                    "xinsir/controlnet-canny-sdxl-1.0",
+                    "xinsir/controlnet-tile-sdxl-1.0",
                 ),
             },
         },
@@ -312,20 +364,21 @@ class PipelineConfigNode:
                     "multiline": False,
                     "placeholder": "Comma-separated t-indices (e.g. 0,4,8)",
                 }),
-                "controlnet_1": ("CONTROLNET_CONFIG", {
-                    "tooltip": "Connect ControlNet node (optional)",
+                # Single controlnets input - model compatibility validated at runtime
+                "controlnets": ("CONTROLNET_CONFIG", {
+                    "tooltip": "Connect ControlNet chain from any Daydream ControlNet node",
                 }),
-                "controlnet_2": ("CONTROLNET_CONFIG", {
-                    "tooltip": "Connect ControlNet node (optional)",
+                "image_preprocessing": ("PREPROCESSING_CONFIG", {
+                    "tooltip": "Connect Daydream Processing Block nodes for image pre-processing",
                 }),
-                "controlnet_3": ("CONTROLNET_CONFIG", {
-                    "tooltip": "Connect ControlNet node (optional)",
+                "image_postprocessing": ("PREPROCESSING_CONFIG", {
+                    "tooltip": "Connect Daydream Processing Block nodes for image post-processing",
                 }),
-                "controlnet_4": ("CONTROLNET_CONFIG", {
-                    "tooltip": "Connect ControlNet node (optional)",
+                "latent_preprocessing": ("PREPROCESSING_CONFIG", {
+                    "tooltip": "Connect Daydream Processing Block nodes for latent pre-processing",
                 }),
-                "controlnet_5": ("CONTROLNET_CONFIG", {
-                    "tooltip": "Connect ControlNet node (optional)",
+                "latent_postprocessing": ("PREPROCESSING_CONFIG", {
+                    "tooltip": "Connect Daydream Processing Block nodes for latent post-processing",
                 }),
                 "enable_ip_adapter": ("BOOLEAN", {
                     "default": False,
@@ -381,11 +434,11 @@ class PipelineConfigNode:
         similar_image_filter_threshold: float = 0.5,
         similar_image_filter_max_skip_frame: int = 10,
         t_index_list: str = "0",
-        controlnet_1: Optional[Dict[str, Any]] = None,
-        controlnet_2: Optional[Dict[str, Any]] = None,
-        controlnet_3: Optional[Dict[str, Any]] = None,
-        controlnet_4: Optional[Dict[str, Any]] = None,
-        controlnet_5: Optional[Dict[str, Any]] = None,
+        controlnets: Any = None,
+        image_preprocessing: Any = None,
+        image_postprocessing: Any = None,
+        latent_preprocessing: Any = None,
+        latent_postprocessing: Any = None,
         enable_ip_adapter: bool = False,
         ip_adapter_type: str = "none",
         ip_adapter_scale: float = 0.5,
@@ -431,16 +484,11 @@ class PipelineConfigNode:
         if seed_value < 0:
             raise ValueError("seed must be >= 0")
 
-        controlnets = self._collect_controlnets(
+        # Collect and validate controlnets
+        controlnets_list = self._collect_controlnets(
             pipeline_id,
             model_id,
-            [
-                ("controlnet_1", controlnet_1),
-                ("controlnet_2", controlnet_2),
-                ("controlnet_3", controlnet_3),
-                ("controlnet_4", controlnet_4),
-                ("controlnet_5", controlnet_5),
-            ],
+            controlnets,
         )
 
         params: Dict[str, Any] = {
@@ -470,8 +518,21 @@ class PipelineConfigNode:
             "similar_image_filter_max_skip_frame": similar_image_filter_max_skip_frame,
         }
 
-        if controlnets:
-            params["controlnets"] = controlnets
+        if controlnets_list:
+            params["controlnets"] = controlnets_list
+
+        processing_blocks = {
+            "image_preprocessing": image_preprocessing,
+            "image_postprocessing": image_postprocessing,
+            "latent_preprocessing": latent_preprocessing,
+            "latent_postprocessing": latent_postprocessing,
+        }
+        for block_name, block_value in processing_blocks.items():
+            if block_value is None:
+                continue
+            normalized_block = self._validate_processing_block(block_value, block_name)
+            if normalized_block["enabled"] or normalized_block["processors"]:
+                params[block_name] = normalized_block
 
         if enable_ip_adapter and ip_adapter_type != "none":
             if ip_adapter_type not in IP_ADAPTER_TYPES:
@@ -582,17 +643,49 @@ class PipelineConfigNode:
         cls,
         pipeline: str,
         model_id: str,
-        controlnet_inputs: List[Tuple[str, Optional[Dict[str, Any]]]],
+        controlnets_input: Any,
     ) -> List[Dict[str, Any]]:
-        controlnets: List[Dict[str, Any]] = []
-        for slot_name, controlnet in controlnet_inputs:
-            if controlnet is None:
-                continue
+        """
+        Collect and validate ControlNet configurations.
+        
+        Args:
+            pipeline: Pipeline identifier
+            model_id: Model identifier
+            controlnets_input: Can be:
+                - None: no controlnets
+                - dict: single controlnet config
+                - list: multiple controlnet configs (from chaining)
+        
+        Returns:
+            List of validated controlnet configurations
+        """
+        if controlnets_input is None:
+            return []
+        
+        # Normalize input to a list
+        if isinstance(controlnets_input, dict):
+            controlnet_list = [controlnets_input]
+        elif isinstance(controlnets_input, list):
+            controlnet_list = controlnets_input
+        else:
+            raise ValueError(
+                f"controlnets must be a dict or list of dicts, "
+                f"got {type(controlnets_input).__name__}"
+            )
+        
+        # Validate each controlnet
+        validated_controlnets: List[Dict[str, Any]] = []
+        for idx, controlnet in enumerate(controlnet_list):
             if not isinstance(controlnet, dict):
-                raise ValueError(f"{slot_name} must be a CONTROLNET_CONFIG dictionary")
+                raise ValueError(
+                    f"controlnet at index {idx} must be a dictionary, "
+                    f"got {type(controlnet).__name__}"
+                )
+            slot_name = f"controlnet_{idx + 1}"
             normalized = cls._validate_controlnet(pipeline, model_id, controlnet, slot_name)
-            controlnets.append(normalized)
-        return controlnets
+            validated_controlnets.append(normalized)
+        
+        return validated_controlnets
 
     @staticmethod
     def _validate_controlnet(
@@ -658,6 +751,84 @@ class PipelineConfigNode:
             "preprocessor_params": params,
         }
         return normalized
+
+    @staticmethod
+    def _validate_processing_block(
+        block: Any,
+        slot_name: str,
+    ) -> Dict[str, Any]:
+        if not isinstance(block, dict):
+            raise ValueError(f"{slot_name} must be a PREPROCESSING_CONFIG dictionary")
+
+        enabled = bool(block.get("enabled", False))
+        processors = block.get("processors", [])
+        if processors is None:
+            processors = []
+
+        if isinstance(processors, dict):
+            processors = [processors]
+        elif isinstance(processors, list):
+            processors = processors
+        else:
+            raise ValueError(
+                f"{slot_name} processors must be a list or dict, "
+                f"got {type(processors).__name__}"
+            )
+
+        normalized_processors: List[Dict[str, Any]] = []
+        for idx, processor in enumerate(processors):
+            normalized_processors.append(
+                PipelineConfigNode._normalize_processor_entry(processor, slot_name, idx)
+            )
+
+        if enabled and not normalized_processors:
+            raise ValueError(f"{slot_name} requires at least one processor when enabled")
+
+        return {
+            "enabled": enabled,
+            "processors": normalized_processors,
+        }
+
+    @staticmethod
+    def _normalize_processor_entry(
+        processor: Dict[str, Any],
+        slot_name: str,
+        index: int,
+    ) -> Dict[str, Any]:
+        if not isinstance(processor, dict):
+            raise ValueError(
+                f"{slot_name} processor at index {index} must be a dictionary, "
+                f"got {type(processor).__name__}"
+            )
+
+        processor_type = processor.get("type")
+        if not isinstance(processor_type, str) or not processor_type.strip():
+            raise ValueError(
+                f"{slot_name} processor at index {index} is missing a valid 'type'"
+            )
+
+        params = processor.get("params", {})
+        if isinstance(params, str):
+            params = params.strip()
+            if params:
+                try:
+                    params = json.loads(params)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"{slot_name} processor at index {index} has invalid params JSON"
+                    ) from exc
+            else:
+                params = {}
+        if not isinstance(params, dict):
+            raise ValueError(
+                f"{slot_name} processor at index {index} must have params as dict/JSON"
+            )
+
+        return {
+            "type": processor_type.strip(),
+            "enabled": bool(processor.get("enabled", True)),
+            "params": params,
+        }
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
