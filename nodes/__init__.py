@@ -1,11 +1,10 @@
+
 import logging
 import sys
 
-from . import api, controlnet, frame_nodes, js, pipeline_config
-from .server_manager import ensure_server_running
+from . import frame_nodes, pipeline_config, routes
 
 LOGGER = logging.getLogger("rtc_stream.nodes")
-
 
 def _configure_rtc_logging():
     base_logger = logging.getLogger("rtc_stream")
@@ -18,14 +17,10 @@ def _configure_rtc_logging():
     base_logger.setLevel(logging.INFO)
     base_logger.propagate = True
 
-
 _configure_rtc_logging()
 
-try:
-    ensure_server_running()
-except Exception as exc:
-    LOGGER.error("Unable to start local API server: %s", exc)
-
+# Register routes for JS communication
+routes.register_routes()
 
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -34,8 +29,12 @@ NODE_CLASS_MAPPINGS.update(frame_nodes.NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(frame_nodes.NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(pipeline_config.NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(pipeline_config.NODE_DISPLAY_NAME_MAPPINGS)
+
+# Controlnet and JS nodes might need review, but frame_nodes is key.
+# I'll check if controlnet.py is needed.
+# And js/__init__.py
+from . import controlnet, js
 NODE_CLASS_MAPPINGS.update(controlnet.NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(controlnet.NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(js.NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(js.NODE_DISPLAY_NAME_MAPPINGS)
-

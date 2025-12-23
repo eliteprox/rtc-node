@@ -1,3 +1,4 @@
+
 """
 Pipeline Configuration Node for ComfyUI.
 
@@ -12,9 +13,10 @@ import logging
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import requests
-
-from rtc_stream.local_api import build_local_api_url
+try:
+    from server import PromptServer
+except ImportError:
+    PromptServer = None
 
 # ---------------------------------------------------------------------------
 # Daydream compatibility registry
@@ -680,20 +682,8 @@ class PipelineConfigNode:
         digest = cls._compute_payload_digest(payload)
         if not cls._mark_if_changed(digest):
             return
-        try:
-            url = build_local_api_url("/pipeline/cache")
-            response = requests.post(
-                url,
-                json={"pipeline_config": payload},
-                timeout=cls._REQUEST_TIMEOUT,
-            )
-            response.raise_for_status()
-            LOGGER.info(
-                "Updated local RTC pipeline config (pipeline=%s)",
-                payload.get("pipeline", ""),
-            )
-        except Exception as exc:  # pragma: no cover - runtime interactions
-            LOGGER.warning("Failed to update local RTC pipeline config: %s", exc)
+        if PromptServer:
+            PromptServer.instance.send_sync("rtc-config-cache", {"pipeline_config": payload})
 
 
 NODE_CLASS_MAPPINGS = {

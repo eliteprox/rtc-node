@@ -1,6 +1,6 @@
-import { app } from "../../../scripts/app.js";
 
-const PREVIEW_PATH = "/extensions/rtc-node/rtc_preview.html";
+import { app } from "../../../scripts/app.js";
+import { rtcManager } from "./rtc_manager.js";
 
 app.registerExtension({
   name: "RTC.StreamPreviewNode",
@@ -21,49 +21,60 @@ app.registerExtension({
 
       const result = originalOnNodeCreated?.apply(this, args);
 
-      this.__rtcIframe = document.createElement("iframe");
-      this.__rtcIframe.style.width = "100%";
-      this.__rtcIframe.style.height = "100%";
-      this.__rtcIframe.style.border = "none";
-      this.__rtcIframe.style.borderRadius = "8px";
-      this.__rtcIframe.allow = "autoplay; fullscreen";
-      this.__rtcIframe.src = `${PREVIEW_PATH}?ts=${Date.now()}`;
+      this.__video = document.createElement("video");
+      this.__video.style.width = "100%";
+      this.__video.style.height = "100%";
+      this.__video.style.objectFit = "contain";
+      this.__video.style.backgroundColor = "#000";
+      this.__video.style.borderRadius = "8px";
+      this.__video.autoplay = true;
+      this.__video.muted = true;
+      this.__video.playsInline = true;
+
+      if (rtcManager.stream) {
+          this.__video.srcObject = rtcManager.stream;
+      }
+
+      this.__unsubscribe = rtcManager.subscribe((event) => {
+          if (event.type === "started") {
+              this.__video.srcObject = event.stream;
+          } else if (event.type === "stopped") {
+              this.__video.srcObject = null;
+          }
+      });
 
       const widgetHeight = Math.max(160, this.size[1] - 48);
-      this.__rtcWidget = this.addDOMWidget("iframe", "Preview", this.__rtcIframe, {
+      this.__rtcWidget = this.addDOMWidget("video", "Preview", this.__video, {
         serialize: false,
         width: this.size[0],
         height: widgetHeight,
       });
 
-      this.addWidget("button", "Reload Preview", null, () => {
-        if (this.__rtcIframe) {
-          const current = this.__rtcIframe.src.split("?")[0];
-          this.__rtcIframe.src = `${current}?ts=${Date.now()}`;
-        }
-      });
-
-      this._updateRtcIframeSize();
+      this._updateSize();
       return result;
     };
 
-    nodeType.prototype._updateRtcIframeSize = function () {
-      if (!this.__rtcWidget || !this.__rtcIframe) {
+    nodeType.prototype._updateSize = function () {
+      if (!this.__rtcWidget || !this.__video) {
         return;
       }
       const width = Math.max(360, this.size[0]);
       const height = Math.max(180, this.size[1] - 48);
-      // Update iframe element directly
-      this.__rtcIframe.style.width = `${width}px`;
-      this.__rtcIframe.style.height = `${height}px`;
+      this.__video.style.width = `${width}px`;
+      this.__video.style.height = `${height}px`;
       this.setDirtyCanvas(true, true);
     };
 
     const originalOnResize = nodeType.prototype.onResize;
     nodeType.prototype.onResize = function (...args) {
       originalOnResize?.apply(this, args);
-      this._updateRtcIframeSize();
+      this._updateSize();
+    };
+    
+    const originalOnRemoved = nodeType.prototype.onRemoved;
+    nodeType.prototype.onRemoved = function() {
+        if (this.__unsubscribe) this.__unsubscribe();
+        if (originalOnRemoved) originalOnRemoved.apply(this, arguments);
     };
   },
 });
-
