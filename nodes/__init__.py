@@ -1,7 +1,7 @@
 import logging
 import sys
 
-from . import api, controlnet, frame_nodes, js, pipeline_config
+from . import api, controlnet, frame_nodes, js, pipeline_config, preprocessing
 from .server_manager import ensure_server_running
 
 LOGGER = logging.getLogger("rtc_stream.nodes")
@@ -36,6 +36,8 @@ NODE_CLASS_MAPPINGS.update(pipeline_config.NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(pipeline_config.NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(controlnet.NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(controlnet.NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(preprocessing.NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(preprocessing.NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(js.NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(js.NODE_DISPLAY_NAME_MAPPINGS)
 

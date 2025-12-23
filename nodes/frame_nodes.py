@@ -117,7 +117,11 @@ class RTCStreamFrameOutput:
         return {
             "required": {
                 "whep_url": ("STRING", {"default": ""}),
-            }
+            },
+            "optional": {
+                "connect_timeout": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 30.0, "step": 0.25}),
+                "frame_timeout": ("FLOAT", {"default": 2.0, "min": 0.0, "max": 30.0, "step": 0.25}),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "STRING")
@@ -131,7 +135,14 @@ class RTCStreamFrameOutput:
     def IS_CHANGED(cls, **kwargs) -> bool:
         return True
 
-    def pull_frame(self, whep_url: str):
+    def pull_frame(
+        self,
+        whep_url: str,
+        connect_timeout: float = 4.0,
+        frame_timeout: float = 2.0,
+    ):
+        connect_timeout = max(connect_timeout, 0.0)
+        frame_timeout = max(frame_timeout, 0.0)
         base_url = self._resolve_base_url()
         if not base_url:
             LOGGER.error("Local RTC API server unavailable; returning blank frame")
@@ -145,10 +156,25 @@ class RTCStreamFrameOutput:
         if should_connect:
             if whep_url:
                 self._connect_whep(base_url, whep_url)
+                if connect_timeout > 0:
+                    _, latest_status = self._wait_for_connection(
+                        base_url, connect_timeout
+                    )
+                    if latest_status:
+                        status = latest_status
             else:
                 LOGGER.warning("WHEP subscriber idle but no whep_url provided")
 
         frame_payload = self._fetch_frame(base_url)
+        if not frame_payload:
+            wait_for_ready = (
+                connect_timeout > 0 and status and not status.get("connected")
+            ) or frame_timeout > 0
+            if wait_for_ready:
+                frame_payload = self._wait_for_frame(
+                    base_url,
+                    connect_timeout if should_connect else frame_timeout,
+                )
         if not frame_payload:
             return (self._blank_tensor(), whep_url)
 
@@ -188,6 +214,21 @@ class RTCStreamFrameOutput:
         except requests.RequestException as exc:
             LOGGER.error("Failed to request WHEP connection: %s", exc)
 
+    def _wait_for_connection(
+        self, base_url: str, timeout: float, poll_interval: float = 0.25
+    ):
+        deadline = time.monotonic() + timeout
+        latest_status = None
+        while time.monotonic() < deadline:
+            status = self._get_whep_status(base_url)
+            latest_status = status
+            if status and status.get("connected"):
+                return True, status
+            if timeout == 0:
+                break
+            time.sleep(poll_interval)
+        return False, latest_status
+
     def _fetch_frame(self, base_url: str) -> Optional[Dict[str, Any]]:
         try:
             response = self._session.get(f"{base_url}/whep/frame", timeout=5)
@@ -196,6 +237,19 @@ class RTCStreamFrameOutput:
         except requests.RequestException as exc:
             LOGGER.error("Failed to fetch WHEP frame: %s", exc)
             return None
+
+    def _wait_for_frame(
+        self, base_url: str, timeout: float, poll_interval: float = 0.25
+    ) -> Optional[Dict[str, Any]]:
+        if timeout <= 0:
+            return None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            payload = self._fetch_frame(base_url)
+            if payload and payload.get("frame_b64"):
+                return payload
+            time.sleep(poll_interval)
+        return None
 
     @staticmethod
     def _b64_to_tensor(frame_b64: str) -> Optional[torch.Tensor]:
@@ -234,10 +288,11 @@ class RTCStreamStatus:
             },
         }
 
-    RETURN_TYPES = ("BOOLEAN", "STRING", "STRING", "STRING", "INT", "INT", "STRING")
-    RETURN_NAMES = ("running", "stream_id", "playback_id", "whep_url", "frames_sent", "queue_depth", "status_json")
+    RETURN_TYPES = ("BOOLEAN", "STRING", "STRING", "STRING", "STRING", "INT", "INT", "STRING")
+    RETURN_NAMES = ("running", "stream_id", "playback_id", "playback_url", "whep_url", "frames_sent", "queue_depth", "status_json")
     FUNCTION = "get_status"
     CATEGORY = "RTC Stream"
+    OUTPUT_NODE = True
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -274,12 +329,22 @@ class RTCStreamStatus:
         running = status.get("running", False)
         stream_id_out = status.get("stream_id", "")
         playback_id = status.get("playback_id", "")
+        playback_url = f"https://lvpr.tv?v={playback_id}" if playback_id else ""
         whep_url = self._extract_whep_url(status)
         frames_sent = int(status.get("frames_sent", 0))
         queue_depth_val = int(status.get("queue_depth", 0))
         status_json = json.dumps(status, indent=2)
 
-        return (running, stream_id_out, playback_id, whep_url, frames_sent, queue_depth_val, status_json)
+        return (
+            running,
+            stream_id_out,
+            playback_id,
+            playback_url,
+            whep_url,
+            frames_sent,
+            queue_depth_val,
+            status_json,
+        )
 
     def _resolve_base_url(self) -> Optional[str]:
         """Resolve the local API server base URL."""
@@ -293,7 +358,7 @@ class RTCStreamStatus:
 
     def _empty_status(self):
         """Return empty status values."""
-        return (False, "", "", "", 0, 0, "{}")
+        return (False, "", "", "", "", 0, 0, "{}")
 
     @staticmethod
     def _extract_whep_url(status: Dict[str, Any]) -> str:

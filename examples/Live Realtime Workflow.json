@@ -88,34 +88,10 @@
       "mode": 0,
       "inputs": [
         {
-          "name": "controlnet_1",
+          "name": "controlnets",
           "shape": 7,
           "type": "CONTROLNET_CONFIG",
           "link": 96
-        },
-        {
-          "name": "controlnet_2",
-          "shape": 7,
-          "type": "CONTROLNET_CONFIG",
-          "link": null
-        },
-        {
-          "name": "controlnet_3",
-          "shape": 7,
-          "type": "CONTROLNET_CONFIG",
-          "link": null
-        },
-        {
-          "name": "controlnet_4",
-          "shape": 7,
-          "type": "CONTROLNET_CONFIG",
-          "link": null
-        },
-        {
-          "name": "controlnet_5",
-          "shape": 7,
-          "type": "CONTROLNET_CONFIG",
-          "link": null
         }
       ],
       "outputs": [
@@ -391,7 +367,7 @@
       "inputs": [],
       "outputs": [
         {
-          "name": "controlnet",
+          "name": "controlnets",
           "type": "CONTROLNET_CONFIG",
           "links": [
             96
