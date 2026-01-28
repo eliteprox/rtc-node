@@ -825,8 +825,21 @@ _NETWORK_RUNTIME = _NetworkRuntime()
 
 def _get_controller(config: NetworkControllerConfig) -> NetworkController:
     if _NETWORK_RUNTIME.controller:
-        _NETWORK_RUNTIME.controller.update_config(config)
-        return _NETWORK_RUNTIME.controller
+        ctrl = _NETWORK_RUNTIME.controller
+        # Clear if stream is dead (ERROR or CLOSED state)
+        if ctrl._stream_state in (
+            NetworkController.StreamState.ERROR,
+            NetworkController.StreamState.CLOSED,
+        ):
+            LOGGER.info(
+                "Clearing dead controller (state=%s, last_error=%s)",
+                ctrl._stream_state.value,
+                ctrl._last_error or "none",
+            )
+            _NETWORK_RUNTIME.controller = None
+        else:
+            ctrl.update_config(config)
+            return ctrl
     controller = NetworkController(config)
     _NETWORK_RUNTIME.controller = controller
     return controller
@@ -912,7 +925,7 @@ class StartTrickleStream:
     """
 
     def __init__(self):
-        self._status_cache: Optional[tuple[str, str, str]] = None
+        self._status_cache: Optional[tuple[str, str, str, str]] = None
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -929,8 +942,8 @@ class StartTrickleStream:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("manifest_id", "publish_url", "subscribe_url")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("manifest_id", "publish_url", "subscribe_url", "error")
     FUNCTION = "start_trickle_stream"
     CATEGORY = "Trickle"
     OUTPUT_NODE = True
@@ -949,7 +962,7 @@ class StartTrickleStream:
         enabled: bool = True,
     ):
         if not enabled:
-            return self._status_cache or ("", "", "")
+            return self._status_cache or ("", "", "", "")
 
         # Extract values from config
         orchestrator_url = config.get("orchestrator_url", "https://localhost:8935")
@@ -970,6 +983,7 @@ class StartTrickleStream:
         )
         controller = _get_controller(controller_config)
         status = controller.start(model_id=model_id, params=pipeline_params or {})
+        health = controller.get_health()
 
         # Start subscriber if subscribe_url is present
         if status.get("subscribe_url"):
@@ -979,13 +993,15 @@ class StartTrickleStream:
         manifest_id = status.get("manifest_id", "")
         publish_url = status.get("publish_url", "")
         subscribe_url = status.get("subscribe_url", "")
-        self._status_cache = (manifest_id, publish_url, subscribe_url)
+        error_msg = "" if controller.is_healthy() else health.get("last_error", "")
+        self._status_cache = (manifest_id, publish_url, subscribe_url, error_msg)
         return self._status_cache
 
 
 class TrickleFrameInput:
     """
     Enqueue frames into the trickle publisher queue.
+    Connect the publish_url output from StartTrickleStream to ensure correct execution order.
     """
 
     @classmethod
@@ -995,6 +1011,10 @@ class TrickleFrameInput:
                 "image": ("IMAGE",),
             },
             "optional": {
+                "publish_url": ("STRING", {
+                    "default": "",
+                    "tooltip": "Connect from StartTrickleStream to ensure stream starts first",
+                }),
                 "enabled": ("BOOLEAN", {"default": True}),
             },
         }
@@ -1010,13 +1030,47 @@ class TrickleFrameInput:
         return True
 
     @staticmethod
-    def push_frame(image: torch.Tensor, enabled: bool = True):
+    def push_frame(image: torch.Tensor, publish_url: str = "", enabled: bool = True):
         if enabled:
+            controller = _NETWORK_RUNTIME.controller
+            
+            # No controller yet - stream not started, skip frame silently
+            if not controller:
+                LOGGER.warning(
+                    "TrickleFrameInput: No stream started yet, dropping frame. "
+                    "Connect publish_url from StartTrickleStream to ensure correct order."
+                )
+                return ()
+            
+            # Check stream state for more specific handling
+            state = controller._stream_state
+            if state == NetworkController.StreamState.IDLE:
+                LOGGER.warning(
+                    "TrickleFrameInput: Stream in IDLE state, dropping frame. "
+                    "Connect publish_url from StartTrickleStream to ensure correct order."
+                )
+                return ()
+            
+            if state in (NetworkController.StreamState.ERROR, NetworkController.StreamState.CLOSED):
+                health = controller.get_health()
+                error_msg = health.get("last_error", "")
+                raise RuntimeError(
+                    f"Trickle stream ended (state={state.value}): {error_msg or 'unknown error'}. "
+                    "Re-run workflow to start a new stream."
+                )
+            
+            # STARTING, RUNNING, DEGRADED states - check is_healthy for grace period logic
+            if not controller.is_healthy():
+                health = controller.get_health()
+                error_msg = health.get("last_error", "")
+                raise RuntimeError(f"Trickle stream not healthy: {error_msg or 'unknown error'}")
+            
             enqueue_tensor_frame(image)
             LOGGER.debug(
-                "Trickle frame enqueued (loop_ready=%s depth=%s)",
+                "Trickle frame enqueued (loop_ready=%s depth=%s state=%s)",
                 has_loop(),
                 queue_depth(),
+                state.value,
             )
         return ()
 

@@ -5,7 +5,9 @@ import contextlib
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
+from enum import Enum
 from fractions import Fraction
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -76,9 +78,23 @@ class NetworkController:
         self.job: Optional[LiveVideoToVideo] = None
         self.media: Optional[MediaPublish] = None
         self._publisher_task: Optional[asyncio.Task] = None
+        self._events_task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
         self.frames_sent: int = 0
+        self.frames_repeated: int = 0
         self.running: bool = False
+        self._stream_state: "NetworkController.StreamState" = self.StreamState.IDLE
+        self._last_error: Optional[str] = None
+        self._started_at: Optional[float] = None
+        self._events_wait_seconds: float = 8.0
+
+    class StreamState(Enum):
+        IDLE = "idle"
+        STARTING = "starting"
+        RUNNING = "running"
+        DEGRADED = "degraded"
+        ERROR = "error"
+        CLOSED = "closed"
 
     def update_config(self, config: NetworkControllerConfig) -> None:
         self.config = config
@@ -131,6 +147,7 @@ class NetworkController:
         return {
             "running": self.running,
             "frames_sent": self.frames_sent,
+            "frames_repeated": self.frames_repeated,
             "publish_url": info.publish_url if info else "",
             "subscribe_url": info.subscribe_url if info else "",
             "control_url": info.control_url if info else "",
@@ -139,6 +156,9 @@ class NetworkController:
             "fps": self.config.fps,
             "frame_width": self.config.frame_width,
             "frame_height": self.config.frame_height,
+            "state": self._stream_state.value,
+            "last_error": self._last_error or "",
+            "started_at": self._started_at or 0.0,
         }
 
     async def _start_async(
@@ -152,6 +172,10 @@ class NetworkController:
         _ensure_allow_http_signer()
         await self._stop_async()
         assert self.loop
+        self._stream_state = self.StreamState.STARTING
+        self._last_error = None
+        self.frames_repeated = 0
+        self._started_at = time.perf_counter()
 
         orch_url = _require_https_orchestrator(self.config.orchestrator_url)
         LOGGER.info("Fetching orchestrator info for %s", self.config.orchestrator_url)
@@ -184,6 +208,8 @@ class NetworkController:
         self.running = True
         self._stop_event = asyncio.Event()
         self._publisher_task = asyncio.create_task(self._publisher_loop(), name="network-publisher")
+        if self.job and self.job.events:
+            self._events_task = asyncio.create_task(self._events_monitor_loop(), name="network-events")
         LOGGER.info("NetworkController started publish_url=%s", job.publish_url)
         return self.status()
 
@@ -195,6 +221,12 @@ class NetworkController:
             self._publisher_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._publisher_task
+            self._publisher_task = None
+        if self._events_task:
+            self._events_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._events_task
+            self._events_task = None
         if self.media:
             with contextlib.suppress(Exception):
                 await self.media.close()
@@ -206,21 +238,130 @@ class NetworkController:
         self._publisher_task = None
         self._stop_event = None
         self.frames_sent = 0
+        self.frames_repeated = 0
+        self._stream_state = self.StreamState.CLOSED
+        self._last_error = None
+        self._started_at = None
 
     async def _publisher_loop(self) -> None:
         assert self.media
         pts = 0
         time_base = Fraction(1, int(round(self.config.fps)))
+        frame_interval = 1.0 / float(self.config.fps) if self.config.fps > 0 else 0.033
+        next_frame_time = time.perf_counter()
+        last_frame: Optional[np.ndarray] = None
+
         while self.running and self._stop_event and not self._stop_event.is_set():
-            frame = await FRAME_BRIDGE.queue.get()
+            now = time.perf_counter()
+            delay = max(0.0, next_frame_time - now)
+
+            got_new_frame = False
+
+            # If we don't have a frame yet, wait indefinitely for the first one
+            # (up to a reasonable timeout to allow graceful shutdown checks)
+            if last_frame is None:
+                try:
+                    frame = await asyncio.wait_for(FRAME_BRIDGE.queue.get(), timeout=1.0)
+                    last_frame = frame
+                    got_new_frame = True
+                    next_frame_time = time.perf_counter()  # Reset timing from first frame
+                except asyncio.TimeoutError:
+                    continue  # Keep waiting for first frame
+            else:
+                # We have a frame to repeat - use FPS-based timing
+                try:
+                    frame = await asyncio.wait_for(FRAME_BRIDGE.queue.get(), timeout=max(0.001, delay))
+                    last_frame = frame
+                    got_new_frame = True
+                except asyncio.TimeoutError:
+                    frame = last_frame
+                    self.frames_repeated += 1
+
+            if frame is None:
+                continue
+
             try:
                 av_frame = self._to_av_frame(frame, pts, time_base)
                 await self.media.write_frame(av_frame)
                 self.frames_sent += 1
                 pts += 1
+                if self._stream_state == self.StreamState.STARTING:
+                    self._stream_state = self.StreamState.RUNNING
+                if got_new_frame:
+                    self._stream_state = self.StreamState.RUNNING
+                else:
+                    self._stream_state = self.StreamState.DEGRADED
             except Exception as exc:  # pragma: no cover - network/encode errors
                 LOGGER.warning("Failed to publish frame: %s", exc)
+
+            next_frame_time += frame_interval
+            # Prevent drift on large delays
+            if next_frame_time < time.perf_counter() - frame_interval:
+                next_frame_time = time.perf_counter() + frame_interval
+
         LOGGER.info("Publisher loop exit")
+
+    async def _events_monitor_loop(self) -> None:
+        """
+        Monitor events URL for stream status and errors. Uses SDK's job.events().
+        """
+        assert self.job
+        start_wait = time.perf_counter()
+        attempt = 0
+        while True:
+            try:
+                attempt += 1
+                async for event in self.job.events(max_buffered_events=64, overflow="drop_oldest"):
+                    event_type = event.get("event_type")
+                    if event_type == "status":
+                        inference_status = event.get("inference_status")
+                        LOGGER.info("Stream status event: %s", inference_status)
+                # If the iterator exits gracefully, treat as closed
+                break
+            except Exception as exc:
+                elapsed = time.perf_counter() - start_wait
+                if elapsed <= self._events_wait_seconds:
+                    LOGGER.info(
+                        "Events stream not ready (attempt=%s, elapsed=%.2fs): %s",
+                        attempt,
+                        elapsed,
+                        exc,
+                    )
+                    await asyncio.sleep(0.5)
+                    continue
+                LOGGER.error("Events stream error after retries: %s", exc)
+                self._stream_state = self.StreamState.ERROR
+                self._last_error = str(exc)
+                if self._stop_event:
+                    self._stop_event.set()
+                break
+
+        if self._stream_state not in (self.StreamState.ERROR, self.StreamState.CLOSED):
+            self._stream_state = self.StreamState.CLOSED
+
+    def get_health(self) -> Dict[str, Any]:
+        """
+        Expose current stream health for UI consumption.
+        """
+        return {
+            "state": self._stream_state.value,
+            "running": self.running,
+            "frames_sent": self.frames_sent,
+            "frames_repeated": self.frames_repeated,
+            "last_error": self._last_error or "",
+            "queue_depth": FRAME_BRIDGE.depth(),
+        }
+
+    def is_healthy(self) -> bool:
+        """
+        Stream is healthy when running, gracefully degraded (repeating frames), or
+        starting within the events wait window.
+        """
+        if self._stream_state in (self.StreamState.RUNNING, self.StreamState.DEGRADED):
+            return True
+        if self._stream_state == self.StreamState.STARTING and self._started_at is not None:
+            return (time.perf_counter() - self._started_at) <= self._events_wait_seconds
+        return False
 
     def _to_av_frame(self, frame: np.ndarray, pts: int, time_base: Fraction) -> av.VideoFrame:
         rgb = normalize_uint8_frame(frame)
