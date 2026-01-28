@@ -16,6 +16,9 @@ LOGGER = logging.getLogger("rtc_stream.credentials_store")
 DEFAULT_API_URL = "https://api.daydream.live"
 ENV_API_URL = "DAYDREAM_API_URL"
 ENV_API_KEY = "DAYDREAM_API_KEY"
+DEFAULT_ORCH_URL = "https://localhost:8935"
+ENV_ORCH_URL = "ORCHESTRATOR_URL"
+ENV_SIGNER_URL = "SIGNER_URL"
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 COMFY_ROOT = ROOT_DIR.parent.parent
@@ -28,6 +31,8 @@ SETTINGS_PATH = (
 
 SETTINGS_API_URL_KEY = "daydream_live.api_base_url"
 SETTINGS_API_KEY_KEY = "daydream_live.api_key"
+SETTINGS_ORCH_URL_KEY = "livepeer.orchestrator_url"
+SETTINGS_SIGNER_URL_KEY = "livepeer.signer_url"
 
 _SETTINGS_LOCK = Lock()
 
@@ -95,6 +100,37 @@ def load_credentials_from_settings() -> Dict[str, Dict[str, str] | str]:
     }
 
 
+def load_network_settings() -> Dict[str, Dict[str, str] | str]:
+    """
+    Load Livepeer network endpoints (orchestrator/signer) from ComfyUI settings,
+    falling back to environment variables and sensible defaults.
+    """
+    with _SETTINGS_LOCK:
+        settings = _load_settings_dict()
+
+    orch_url = _normalize_api_url(settings.get(SETTINGS_ORCH_URL_KEY) or DEFAULT_ORCH_URL)
+    signer_url = _sanitize(settings.get(SETTINGS_SIGNER_URL_KEY, ""))
+
+    orch_source = "settings" if settings.get(SETTINGS_ORCH_URL_KEY) else "default"
+    signer_source = "settings" if settings.get(SETTINGS_SIGNER_URL_KEY) else "missing"
+
+    env_orch = os.environ.get(ENV_ORCH_URL, "").strip()
+    if env_orch:
+        orch_url = _normalize_api_url(env_orch)
+        orch_source = "env"
+
+    env_signer = os.environ.get(ENV_SIGNER_URL, "").strip()
+    if env_signer:
+        signer_url = _sanitize(env_signer)
+        signer_source = "env"
+
+    return {
+        "orchestrator_url": orch_url or DEFAULT_ORCH_URL,
+        "signer_url": signer_url,
+        "sources": {"orchestrator_url": orch_source, "signer_url": signer_source},
+    }
+
+
 def persist_credentials_to_settings(
     api_url: str | None = None, api_key: str | None = None
 ) -> Dict[str, Dict[str, str] | str]:
@@ -125,6 +161,34 @@ def persist_credentials_to_settings(
     return load_credentials_from_settings()
 
 
+def persist_network_settings(
+    orchestrator_url: str | None = None, signer_url: str | None = None
+) -> Dict[str, Dict[str, str] | str]:
+    """
+    Persist Livepeer network endpoints into ComfyUI settings.
+    """
+    with _SETTINGS_LOCK:
+        data = _load_settings_dict()
+
+        if orchestrator_url is not None:
+            cleaned = _normalize_api_url(orchestrator_url)
+            if cleaned:
+                data[SETTINGS_ORCH_URL_KEY] = cleaned
+            elif SETTINGS_ORCH_URL_KEY in data:
+                data.pop(SETTINGS_ORCH_URL_KEY, None)
+
+        if signer_url is not None:
+            cleaned = _sanitize(signer_url)
+            if cleaned:
+                data[SETTINGS_SIGNER_URL_KEY] = cleaned
+            else:
+                data.pop(SETTINGS_SIGNER_URL_KEY, None)
+
+        _write_settings_dict(data)
+
+    return load_network_settings()
+
+
 # Backwards-compatible aliases for existing imports
 def load_credentials_from_env() -> Dict[str, Dict[str, str] | str]:
     return load_credentials_from_settings()
@@ -139,6 +203,8 @@ def persist_credentials_to_env(
 __all__ = [
     "load_credentials_from_settings",
     "persist_credentials_to_settings",
+    "load_network_settings",
+    "persist_network_settings",
     "load_credentials_from_env",
     "persist_credentials_to_env",
     "SETTINGS_PATH",

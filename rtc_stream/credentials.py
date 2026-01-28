@@ -11,11 +11,16 @@ from __future__ import annotations
 import os
 from typing import Tuple
 
-from .credentials_store import load_credentials_from_settings
+from .credentials_store import load_credentials_from_settings, load_network_settings
 
 DEFAULT_API_URL = "https://api.daydream.live"
 ENV_API_URL = "DAYDREAM_API_URL"
 ENV_API_KEY = "DAYDREAM_API_KEY"
+
+DEFAULT_ORCH_URL = "https://hky.eliteencoder.net:8936"
+DEFAULT_SIGNER_URL = "http://localhost:8081"
+ENV_ORCH_URL = "ORCHESTRATOR_URL"
+ENV_SIGNER_URL = "SIGNER_URL"
 
 
 def resolve_credentials(api_url: str = "", api_key: str = "") -> Tuple[str, str]:
@@ -49,5 +54,35 @@ def resolve_credentials(api_url: str = "", api_key: str = "") -> Tuple[str, str]
     return resolved_url, resolved_key
 
 
-__all__ = ["resolve_credentials"]
+def resolve_network_config(
+    orchestrator_url: str = "",
+    signer_url: str = "",
+) -> Tuple[str, str]:
+    """
+    Resolve orchestrator and signer endpoints for the Livepeer network.
+    Preference order:
+    1. Explicit parameters supplied by caller.
+    2. Values stored in ComfyUI settings.
+    3. Process environment variables.
+    4. Default orchestrator URL (signer is optional).
+    """
+
+    state = load_network_settings()
+    settings_orch = (state.get("orchestrator_url") or "").strip()
+    settings_signer = (state.get("signer_url") or "").strip()
+
+    resolved_orch = (orchestrator_url or settings_orch or os.environ.get(ENV_ORCH_URL, DEFAULT_ORCH_URL)).strip()
+    resolved_signer = (
+        signer_url or settings_signer or os.environ.get(ENV_SIGNER_URL, DEFAULT_SIGNER_URL)
+    ).strip()
+
+    if not resolved_orch:
+        raise ValueError(
+            "Orchestrator URL is missing. Set ORCHESTRATOR_URL or pass orchestrator_url."
+        )
+
+    return resolved_orch, resolved_signer
+
+
+__all__ = ["resolve_credentials", "resolve_network_config"]
 

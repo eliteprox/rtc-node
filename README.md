@@ -1,16 +1,15 @@
-# RTC Node for ComfyUI
+# RTC Node for ComfyUI (Livepeer Network)
 
-Real-time streaming integration for ComfyUI that enables live video streaming to and from Daydream.live using WebRTC (WHIP/WHEP protocols).
+Real-time streaming for ComfyUI using the Livepeer gateway trickle protocol (no WHIP/WHEP). Frames are published directly to orchestrators and outputs are pulled via trickle subscribe—no Daydream API or WebRTC required.
 
 ## Features
 
-- 🎥 **Stream frames from ComfyUI workflows** to Daydream.live for real-time AI processing
-- 📥 **Receive processed frames back** into ComfyUI via WHEP
-- 🔄 **Bidirectional streaming** - both input and output nodes
-- 🚀 **Low-latency WebRTC** - optimized for real-time applications
-- 🎛️ **Pipeline configuration** - full control over Daydream streaming parameters
-- 🖥️ **Built-in sidebar UI** - manage streams directly from ComfyUI interface
-- 🪟 **Live preview node** - iframe-based WHEP player embedded inside your graph
+- 🎥 **Trickle publish/subscribe**: send/receive frames without WHIP/WHEP
+- 🔄 **Bidirectional streaming nodes**: start, input, and output nodes for ComfyUI
+- ⚙️ **Configurable orchestrator/signer**: point at any Livepeer orchestrator, optional remote signer
+- 🧱 **FrameBridge**: sync→async bridge for safe node enqueue
+- 🛠️ **Optional HTTP server**: lightweight FastAPI (`rtc_stream/api_server.py`) for external producers
+- 💤 **Legacy Daydream disabled by default**: WHIP/WHEP and Daydream nodes are not registered
 
 ## Installation
 
@@ -48,11 +47,31 @@ Restart your ComfyUI server.
 ### Verify Installation
 
 After installation, you should see:
-- New nodes in the **"RTC Stream"** category
-- A **Daydream sidebar** in the ComfyUI interface
-- Server controls accessible from the UI
+- New nodes in the **"Network Stream"** category (labeled “(Trickle)”)
+- No Daydream sidebar by default (legacy WHIP/WHEP disabled)
 
-## Quick Start
+## Quick Start (Livepeer trickle)
+
+1) **Set orchestrator/signer (optional)**  
+   - Environment: `ORCHESTRATOR_URL=https://localhost:8935`, `SIGNER_URL=https://signer.example.com` (signer optional).  
+   - Or configure via ComfyUI settings file; see `rtc_stream/credentials_store.py` keys `livepeer.orchestrator_url`, `livepeer.signer_url`.
+
+2) **Add nodes**  
+   - `StartNetworkStream` (outputs manifest/publish/subscribe URLs)  
+   - `NetworkFrameInput` (enqueue frames to publish)  
+   - `NetworkFrameOutput` (read latest output frame from subscriber)
+
+3) **Run the graph**  
+   - The controller publishes frames via trickle; subscriber pulls output frames back. No WHIP/WHEP.
+
+4) **Optional HTTP server**  
+   - If you need external producers, run `python -m rtc_stream.api_server` (FastAPI) and use `/start`, `/frames`, `/stop`, `/status`.
+
+## Legacy Daydream / WHIP-WHEP
+
+Daydream/WebRTC nodes and server endpoints are disabled by default. If you still need them, re-enable manually in code (see `LEGACY_DAYDREAM_ENABLED` in `nodes/frame_nodes.py`) and install `aiortc>=1.9.0`. The recommended path is the Livepeer trickle network nodes.
+
+## Legacy Quick Start (Daydream / WHIP-WHEP)
 
 ### 1. Set Up Daydream Credentials
 

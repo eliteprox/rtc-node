@@ -1,8 +1,10 @@
+import asyncio
 import base64
 import io
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -783,5 +785,350 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "StartRTCStream": "Start RTC Stream",
     "UpdateRTCStream": "Update RTC Stream",
     "RTCStreamStatus": "RTC Stream Status",
+    "TrickleFrameInput": "Trickle Frame Input",
+    "TrickleFrameOutput": "Trickle Frame Output",
+    "StartTrickleStream": "Start Trickle Stream",
+    "UpdateTrickleStream": "Update Trickle Stream",
 }
+
+LEGACY_DAYDREAM_ENABLED = False
+
+if not LEGACY_DAYDREAM_ENABLED:
+    for _legacy_key in [
+        "RTCStreamFrameInput",
+        "RTCStreamFrameOutput",
+        "StartRTCStream",
+        "UpdateRTCStream",
+        "RTCStreamStatus",
+    ]:
+        NODE_CLASS_MAPPINGS.pop(_legacy_key, None)
+        NODE_DISPLAY_NAME_MAPPINGS.pop(_legacy_key, None)
+
+
+# --- Network (trickle) nodes ---
+
+from rtc_stream.credentials import resolve_network_config
+from rtc_stream.frame_bridge import enqueue_tensor_frame, queue_depth, has_loop
+from rtc_stream.network_controller import NetworkController, NetworkControllerConfig
+from rtc_stream.network_subscriber import NetworkSubscriber, NetworkSubscriberConfig
+from rtc_stream.whep_frame_bridge import WHEP_FRAME_BRIDGE
+
+
+@dataclass
+class _NetworkRuntime:
+    controller: Optional[NetworkController] = None
+    subscriber: Optional[NetworkSubscriber] = None
+
+
+_NETWORK_RUNTIME = _NetworkRuntime()
+
+
+def _get_controller(config: NetworkControllerConfig) -> NetworkController:
+    if _NETWORK_RUNTIME.controller:
+        _NETWORK_RUNTIME.controller.update_config(config)
+        return _NETWORK_RUNTIME.controller
+    controller = NetworkController(config)
+    _NETWORK_RUNTIME.controller = controller
+    return controller
+
+
+def _get_subscriber(start_seq: int, loop: asyncio.AbstractEventLoop) -> NetworkSubscriber:
+    if _NETWORK_RUNTIME.subscriber:
+        _NETWORK_RUNTIME.subscriber.attach_loop(loop)
+        _NETWORK_RUNTIME.subscriber.config.start_seq = start_seq
+        return _NETWORK_RUNTIME.subscriber
+    subscriber = NetworkSubscriber(NetworkSubscriberConfig(start_seq=start_seq))
+    subscriber.attach_loop(loop)
+    _NETWORK_RUNTIME.subscriber = subscriber
+    return subscriber
+
+
+class TrickleConfig:
+    """
+    Configuration node for trickle streaming parameters.
+    Outputs a config dict that can be connected to Start Trickle Stream.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "orchestrator_url": ("STRING", {
+                    "default": "https://localhost:8935",
+                    "tooltip": "Orchestrator URL (e.g., https://hky.eliteencoder.net:8936)",
+                }),
+                "signer_url": ("STRING", {
+                    "default": "",
+                    "tooltip": "Signer URL for authentication (e.g., http://localhost:8081)",
+                }),
+                "model_id": ("STRING", {
+                    "default": "noop",
+                    "tooltip": "Model ID to use (e.g., noop, comfystream)",
+                }),
+                "fps": ("FLOAT", {
+                    "default": 30.0,
+                    "min": 1.0,
+                    "max": 120.0,
+                    "step": 0.1,
+                    "tooltip": "Frames per second",
+                }),
+                "keyframe_interval": ("FLOAT", {
+                    "default": 2.0,
+                    "min": 0.5,
+                    "max": 10.0,
+                    "step": 0.1,
+                    "tooltip": "Keyframe interval in seconds",
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("TRICKLE_CONFIG",)
+    RETURN_NAMES = ("config",)
+    FUNCTION = "create_config"
+    CATEGORY = "Trickle"
+
+    def create_config(
+        self,
+        orchestrator_url: str,
+        signer_url: str,
+        model_id: str,
+        fps: float,
+        keyframe_interval: float,
+    ) -> tuple:
+        config = {
+            "orchestrator_url": orchestrator_url,
+            "signer_url": signer_url,
+            "model_id": model_id,
+            "fps": fps,
+            "keyframe_interval": keyframe_interval,
+        }
+        return (config,)
+
+
+class StartTrickleStream:
+    """
+    Start a trickle-based stream directly to an orchestrator.
+    Requires a TrickleConfig node for connection settings.
+    """
+
+    def __init__(self):
+        self._status_cache: Optional[tuple[str, str, str]] = None
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "config": ("TRICKLE_CONFIG",),
+            },
+            "optional": {
+                "pipeline_params": ("PIPELINE_CONFIG",),
+                "width": ("INT", {"default": 512, "min": 64, "max": 4096}),
+                "height": ("INT", {"default": 512, "min": 64, "max": 4096}),
+                "start_seq": ("INT", {"default": -2}),
+                "enabled": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("manifest_id", "publish_url", "subscribe_url")
+    FUNCTION = "start_trickle_stream"
+    CATEGORY = "Trickle"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return True
+
+    def start_trickle_stream(
+        self,
+        config: Dict[str, Any],
+        pipeline_params: Optional[Dict[str, Any]] = None,
+        width: int = 512,
+        height: int = 512,
+        start_seq: int = -2,
+        enabled: bool = True,
+    ):
+        if not enabled:
+            return self._status_cache or ("", "", "")
+
+        # Extract values from config
+        orchestrator_url = config.get("orchestrator_url", "https://localhost:8935")
+        signer_url = config.get("signer_url", "")
+        model_id = config.get("model_id", "noop")
+        fps = config.get("fps", 30.0)
+        keyframe_interval = config.get("keyframe_interval", 2.0)
+
+        resolved_orch, resolved_signer = resolve_network_config(orchestrator_url, signer_url)
+        controller_config = NetworkControllerConfig(
+            orchestrator_url=resolved_orch,
+            signer_url=resolved_signer or None,
+            model_id=model_id,
+            fps=float(fps),
+            frame_width=width,
+            frame_height=height,
+            keyframe_interval_s=float(keyframe_interval),
+        )
+        controller = _get_controller(controller_config)
+        status = controller.start(model_id=model_id, params=pipeline_params or {})
+
+        # Start subscriber if subscribe_url is present
+        if status.get("subscribe_url"):
+            subscriber = _get_subscriber(start_seq, controller.loop)
+            subscriber.start(status["subscribe_url"])
+
+        manifest_id = status.get("manifest_id", "")
+        publish_url = status.get("publish_url", "")
+        subscribe_url = status.get("subscribe_url", "")
+        self._status_cache = (manifest_id, publish_url, subscribe_url)
+        return self._status_cache
+
+
+class TrickleFrameInput:
+    """
+    Enqueue frames into the trickle publisher queue.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "image": ("IMAGE",),
+            },
+            "optional": {
+                "enabled": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    FUNCTION = "push_frame"
+    CATEGORY = "Trickle"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs) -> bool:
+        return True
+
+    @staticmethod
+    def push_frame(image: torch.Tensor, enabled: bool = True):
+        if enabled:
+            enqueue_tensor_frame(image)
+            LOGGER.debug(
+                "Trickle frame enqueued (loop_ready=%s depth=%s)",
+                has_loop(),
+                queue_depth(),
+            )
+        return ()
+
+
+class TrickleFrameOutput:
+    """
+    Retrieve the latest decoded frame from the trickle subscriber.
+    """
+
+    def __init__(self):
+        self._blank = self._blank_tensor()
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {"optional": {}}
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "pull_frame"
+    CATEGORY = "Trickle"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs) -> bool:
+        return True
+
+    def pull_frame(self):
+        """Pull the latest frame from the trickle subscriber (synchronous)."""
+        try:
+            frame_np, timestamp, has_frame = WHEP_FRAME_BRIDGE.get_frame_or_blank_sync()
+            if has_frame:
+                LOGGER.debug(
+                    "TrickleFrameOutput got frame %sx%s (timestamp=%.2f)",
+                    frame_np.shape[1],
+                    frame_np.shape[0],
+                    timestamp,
+                )
+            tensor = torch.from_numpy(frame_np.astype(np.float32) / 255.0).unsqueeze(0)
+            return (tensor,)
+        except Exception as exc:
+            LOGGER.error("Failed to pull trickle frame: %s", exc)
+            return (self._blank,)
+
+    @staticmethod
+    def _blank_tensor(width: int = 1280, height: int = 720) -> torch.Tensor:
+        blank = torch.zeros((height, width, 3), dtype=torch.float32)
+        return blank.unsqueeze(0)
+
+
+class UpdateTrickleStream:
+    """
+    Send control messages to the running trickle stream (if supported).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "control_payload": ("DICT",),
+            },
+            "optional": {
+                "enabled": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    FUNCTION = "update_trickle_stream"
+    CATEGORY = "Trickle"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return True
+
+    def update_trickle_stream(self, control_payload: Dict[str, Any], enabled: bool = True):
+        if not enabled:
+            return ()
+        controller = _NETWORK_RUNTIME.controller
+        if not controller or not controller.job or not controller.job.control:
+            LOGGER.warning("No active trickle stream control channel available")
+            return ()
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                controller.job.control.write_control(control_payload),
+                controller.loop,
+            )
+            future.result(timeout=5)
+            return ()
+        except Exception as exc:
+            LOGGER.error("Failed to send control payload: %s", exc)
+            return ()
+
+
+# Register trickle nodes into the mapping dictionaries
+NODE_CLASS_MAPPINGS.update(
+    {
+        "TrickleConfig": TrickleConfig,
+        "TrickleFrameInput": TrickleFrameInput,
+        "TrickleFrameOutput": TrickleFrameOutput,
+        "StartTrickleStream": StartTrickleStream,
+        "UpdateTrickleStream": UpdateTrickleStream,
+    }
+)
+
+NODE_DISPLAY_NAME_MAPPINGS.update(
+    {
+        "TrickleConfig": "Trickle Config",
+        "TrickleFrameInput": "Trickle Frame Input",
+        "TrickleFrameOutput": "Trickle Frame Output",
+        "StartTrickleStream": "Start Trickle Stream",
+        "UpdateTrickleStream": "Update Trickle Stream",
+    }
+)
 

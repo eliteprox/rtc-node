@@ -8,6 +8,8 @@ from typing import Deque, Dict, List, Optional, Union
 import numpy as np
 import torch
 from PIL import Image
+from fractions import Fraction
+import av
 
 
 LOGGER = logging.getLogger("rtc_stream.frame_bridge")
@@ -147,6 +149,30 @@ def enqueue_tensor_frame(tensor: torch.Tensor) -> None:
     """
 
     enqueue_array_frame(tensor_to_uint8_frame(tensor))
+
+
+def normalize_uint8_frame(frame: np.ndarray) -> np.ndarray:
+    """
+    Ensure an ndarray is RGB uint8.
+    """
+    if frame.ndim != 3 or frame.shape[2] not in (3, 4):
+        raise ValueError("frame must be HxWxC RGB/RGBA")
+    normalized = frame[:, :, :3]
+    if normalized.dtype != np.uint8:
+        normalized = np.clip(normalized, 0, 255).astype(np.uint8)
+    return normalized
+
+
+def array_to_av_frame(frame: np.ndarray, *, pts: int, fps: float, width: int, height: int) -> av.VideoFrame:
+    """
+    Convert a numpy RGB frame into a yuv420p av.VideoFrame with PTS/time_base set.
+    """
+    rgb = normalize_uint8_frame(frame)
+    video_frame = av.VideoFrame.from_ndarray(rgb, format="rgb24")
+    video_frame = video_frame.reformat(width=width, height=height, format="yuv420p")
+    video_frame.pts = pts
+    video_frame.time_base = Fraction(1, int(round(fps)))
+    return video_frame
 
 
 def enqueue_file_frame(image_path: Union[str, Path]) -> None:
