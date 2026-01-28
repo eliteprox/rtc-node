@@ -3,10 +3,12 @@ import base64
 import io
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+import folder_paths
 import numpy as np
 import requests
 import torch
@@ -808,16 +810,17 @@ if not LEGACY_DAYDREAM_ENABLED:
 # --- Network (trickle) nodes ---
 
 from rtc_stream.credentials import resolve_network_config
-from rtc_stream.frame_bridge import enqueue_tensor_frame, queue_depth, has_loop
+from rtc_stream.frame_bridge import enqueue_tensor_frame, queue_depth, has_loop, FRAME_BRIDGE
 from rtc_stream.network_controller import NetworkController, NetworkControllerConfig
 from rtc_stream.network_subscriber import NetworkSubscriber, NetworkSubscriberConfig
-from rtc_stream.whep_frame_bridge import WHEP_FRAME_BRIDGE
+from rtc_stream.trickle_output_bridge import TRICKLE_OUTPUT_BRIDGE
 
 
 @dataclass
 class _NetworkRuntime:
     controller: Optional[NetworkController] = None
     subscriber: Optional[NetworkSubscriber] = None
+    last_startup_error: Optional[str] = None  # Track startup failures
 
 
 _NETWORK_RUNTIME = _NetworkRuntime()
@@ -922,10 +925,22 @@ class StartTrickleStream:
     """
     Start a trickle-based stream directly to an orchestrator.
     Requires a TrickleConfig node for connection settings.
+    Proactively checks stream health if last execution was over 4 seconds ago.
+    Each new stream gets unique trickle URLs from the orchestrator.
+    
+    IS_CHANGED returns a value based on stream state, so when the stream ends,
+    ComfyUI knows to re-execute this node and dependent nodes.
     """
+
+    # If more than this many seconds since last execution, proactively check stream health
+    STALE_CHECK_SECONDS = 4.0
+    
+    # Class-level counter for stream generations - increments when a new stream starts
+    _stream_generation: int = 0
 
     def __init__(self):
         self._status_cache: Optional[tuple[str, str, str, str]] = None
+        self._last_execution_time: float = 0.0
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -938,7 +953,10 @@ class StartTrickleStream:
                 "width": ("INT", {"default": 512, "min": 64, "max": 4096}),
                 "height": ("INT", {"default": 512, "min": 64, "max": 4096}),
                 "start_seq": ("INT", {"default": -2}),
-                "enabled": ("BOOLEAN", {"default": True}),
+                "enabled": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Enable to start/continue streaming. Disable to stop the stream and reset for a new session.",
+                }),
             },
         }
 
@@ -949,8 +967,113 @@ class StartTrickleStream:
     OUTPUT_NODE = True
 
     @classmethod
-    def IS_CHANGED(cls, **kwargs):
-        return True
+    def IS_CHANGED(cls, **kwargs) -> str:
+        """
+        Return a value that changes when stream state changes.
+        This tells ComfyUI to re-execute when stream dies or a new stream starts.
+        """
+        controller = _NETWORK_RUNTIME.controller
+        
+        if not controller:
+            # No controller - check if there was a startup error
+            has_error = bool(_NETWORK_RUNTIME.last_startup_error)
+            return f"no_stream_{cls._stream_generation}_error={has_error}"
+        
+        # Check if background tasks are still alive (updates state if dead)
+        controller.check_tasks_alive()
+        
+        state = controller._stream_state
+        running = controller.running
+        
+        # Return a composite value that changes when stream state changes
+        # This triggers re-execution when stream dies
+        return f"{state.value}_{running}_{cls._stream_generation}"
+
+    def _stop_stream(self):
+        """
+        Stop the current stream, reset tracking, and return notification.
+        Called when enabled=False.
+        """
+        stream_was_running = False
+        
+        # Stop the controller if active
+        if _NETWORK_RUNTIME.controller:
+            controller = _NETWORK_RUNTIME.controller
+            stream_was_running = controller.running
+            
+            LOGGER.info("StartTrickleStream: Stopping stream (user disabled)")
+            controller.stop()
+            
+            # Clear runtime state so next run starts fresh
+            _NETWORK_RUNTIME.controller = None
+        
+        # Stop the subscriber if active
+        if _NETWORK_RUNTIME.subscriber:
+            try:
+                _NETWORK_RUNTIME.subscriber.stop()
+            except Exception as exc:
+                LOGGER.warning("Failed to stop subscriber: %s", exc)
+            _NETWORK_RUNTIME.subscriber = None
+        
+        # Reset the frame bridge to clear old loop bindings
+        FRAME_BRIDGE.reset()
+        
+        # Reset instance state
+        self._status_cache = ("", "", "", "Stream stopped")
+        self._last_execution_time = 0.0
+        
+        # Reset TrickleFrameInput timing so it doesn't think stream is stale
+        TrickleFrameInput._last_frame_time = 0.0
+        
+        if stream_was_running:
+            LOGGER.info("StartTrickleStream: Stream stopped successfully")
+            message = "Stream stopped. Enable to start a new stream."
+        else:
+            LOGGER.info("StartTrickleStream: No active stream to stop")
+            message = "No active stream. Enable to start streaming."
+        
+        # Return with UI notification
+        return {
+            "ui": {"text": [message]},
+            "result": self._status_cache,
+        }
+
+    def _check_and_clear_stale_stream(self) -> None:
+        """
+        If enough time has passed since last execution, proactively check if
+        the existing stream is still alive. If dead, clear the controller so
+        a new stream will be started.
+        """
+        now = time.perf_counter()
+        elapsed = now - self._last_execution_time
+        
+        if elapsed > self.STALE_CHECK_SECONDS and _NETWORK_RUNTIME.controller:
+            ctrl = _NETWORK_RUNTIME.controller
+            state = ctrl._stream_state
+            
+            # Check if stream died
+            if state in (
+                NetworkController.StreamState.ERROR,
+                NetworkController.StreamState.CLOSED,
+            ):
+                LOGGER.info(
+                    "StartTrickleStream: Stream stale after %.1fs (state=%s), will start new stream",
+                    elapsed,
+                    state.value,
+                )
+                _NETWORK_RUNTIME.controller = None
+                _NETWORK_RUNTIME.subscriber = None
+            elif not ctrl.is_healthy():
+                # Also check is_healthy for edge cases (e.g., STARTING but grace period expired)
+                health = ctrl.get_health()
+                LOGGER.info(
+                    "StartTrickleStream: Stream unhealthy after %.1fs (state=%s, error=%s), will start new stream",
+                    elapsed,
+                    state.value,
+                    health.get("last_error", ""),
+                )
+                _NETWORK_RUNTIME.controller = None
+                _NETWORK_RUNTIME.subscriber = None
 
     def start_trickle_stream(
         self,
@@ -961,8 +1084,12 @@ class StartTrickleStream:
         start_seq: int = -2,
         enabled: bool = True,
     ):
+        # When disabled, stop the stream and reset state
         if not enabled:
-            return self._status_cache or ("", "", "", "")
+            return self._stop_stream()
+
+        # Proactively check for stale/dead streams before proceeding
+        self._check_and_clear_stale_stream()
 
         # Extract values from config
         orchestrator_url = config.get("orchestrator_url", "https://localhost:8935")
@@ -982,13 +1109,108 @@ class StartTrickleStream:
             keyframe_interval_s=float(keyframe_interval),
         )
         controller = _get_controller(controller_config)
-        status = controller.start(model_id=model_id, params=pipeline_params or {})
-        health = controller.get_health()
+        
+        # Option 2: Validate stream state before reusing
+        # Force restart if stream is dead/closed/idle, or if not healthy
+        needs_restart = False
+        if controller._stream_state in (
+            NetworkController.StreamState.ERROR,
+            NetworkController.StreamState.CLOSED,
+            NetworkController.StreamState.IDLE,
+        ):
+            LOGGER.info(
+                "StartTrickleStream: Stream state=%s, forcing restart",
+                controller._stream_state.value,
+            )
+            needs_restart = True
+        elif not controller.is_healthy():
+            health = controller.get_health()
+            LOGGER.info(
+                "StartTrickleStream: Stream unhealthy (state=%s, error=%s), forcing restart",
+                controller._stream_state.value,
+                health.get("last_error", ""),
+            )
+            needs_restart = True
+        elif controller.running:
+            # Stream is running and healthy - reuse existing stream
+            LOGGER.debug(
+                "StartTrickleStream: Reusing healthy stream (state=%s, frames_sent=%d)",
+                controller._stream_state.value,
+                controller.frames_sent,
+            )
+            status = controller.status()
+            health = controller.get_health()
+            
+            # Ensure subscriber is running if we have a subscribe_url
+            subscribe_url = status.get("subscribe_url")
+            if subscribe_url:
+                subscriber = _get_subscriber(start_seq, controller.loop)
+                if not subscriber.task_alive:
+                    task_error = subscriber.check_task_exception()
+                    LOGGER.info(
+                        "StartTrickleStream: Subscriber task not alive (error=%s), restarting",
+                        task_error or "none",
+                    )
+                    subscriber.start(subscribe_url)
+            
+            # Skip to output - don't restart
+            needs_restart = False
+        else:
+            needs_restart = True
+        
+        if needs_restart:
+            try:
+                status = controller.start(
+                    model_id=model_id,
+                    params=pipeline_params or {},
+                )
+                health = controller.get_health()
+                
+                # Increment stream generation so IS_CHANGED reflects the new stream
+                StartTrickleStream._stream_generation += 1
+                
+                # Clear any previous startup error since we succeeded
+                _NETWORK_RUNTIME.last_startup_error = None
+                
+                LOGGER.info(
+                    "StartTrickleStream: New stream started (generation=%d, publish_url=%s)",
+                    StartTrickleStream._stream_generation,
+                    status.get("publish_url", "")[:50] + "...",
+                )
+                
+                # Start subscriber if subscribe_url is present (only on restart)
+                if status.get("subscribe_url"):
+                    subscriber = _get_subscriber(start_seq, controller.loop)
+                    subscriber.start(status["subscribe_url"])
+            except Exception as exc:
+                # Handle connection/timeout errors gracefully
+                error_str = str(exc)
+                LOGGER.error("StartTrickleStream: Failed to start stream: %s", error_str)
+                
+                # Properly stop and clean up the controller before clearing
+                if controller:
+                    try:
+                        controller.stop()
+                    except Exception as stop_exc:
+                        LOGGER.warning("Failed to stop controller during error cleanup: %s", stop_exc)
+                
+                # Reset the frame bridge to clear old loop bindings
+                FRAME_BRIDGE.reset()
+                
+                # Clear the controller so next execution tries fresh
+                _NETWORK_RUNTIME.controller = None
+                _NETWORK_RUNTIME.subscriber = None
+                self._status_cache = None
+                
+                # Track the startup error so other nodes know why there's no stream
+                error_msg = f"Failed to start stream: {error_str}"
+                _NETWORK_RUNTIME.last_startup_error = error_msg
+                
+                self._status_cache = ("", "", "", error_msg)
+                return self._status_cache
 
-        # Start subscriber if subscribe_url is present
-        if status.get("subscribe_url"):
-            subscriber = _get_subscriber(start_seq, controller.loop)
-            subscriber.start(status["subscribe_url"])
+        # Update tracking state
+        self._last_execution_time = time.perf_counter()
 
         manifest_id = status.get("manifest_id", "")
         publish_url = status.get("publish_url", "")
@@ -1003,6 +1225,10 @@ class TrickleFrameInput:
     Enqueue frames into the trickle publisher queue.
     Connect the publish_url output from StartTrickleStream to ensure correct execution order.
     """
+    
+    # Class-level tracking for proactive health checks
+    _last_frame_time: float = 0.0
+    HEALTH_CHECK_INTERVAL_SECONDS: float = 4.0
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -1029,21 +1255,60 @@ class TrickleFrameInput:
     def IS_CHANGED(cls, **kwargs) -> bool:
         return True
 
-    @staticmethod
-    def push_frame(image: torch.Tensor, publish_url: str = "", enabled: bool = True):
+    def push_frame(self, image: torch.Tensor, publish_url: str = "", enabled: bool = True):
         if enabled:
             controller = _NETWORK_RUNTIME.controller
             
-            # No controller yet - stream not started, skip frame silently
+            # No controller - stream not started or failed to start
             if not controller:
-                LOGGER.warning(
-                    "TrickleFrameInput: No stream started yet, dropping frame. "
-                    "Connect publish_url from StartTrickleStream to ensure correct order."
-                )
-                return ()
+                # Check if there was a startup error
+                if _NETWORK_RUNTIME.last_startup_error:
+                    LOGGER.error(
+                        "TrickleFrameInput: No stream available - %s",
+                        _NETWORK_RUNTIME.last_startup_error,
+                    )
+                    raise RuntimeError(
+                        f"Trickle stream failed to start: {_NETWORK_RUNTIME.last_startup_error}. "
+                        "Check orchestrator connection and try again."
+                    )
+                else:
+                    # No error but no controller - likely execution order issue
+                    LOGGER.warning(
+                        "TrickleFrameInput: No stream started yet, dropping frame. "
+                        "Connect publish_url from StartTrickleStream to ensure correct order."
+                    )
+                    return ()
+            
+            # Proactive health check if enough time has passed since last frame
+            now = time.perf_counter()
+            elapsed_since_last = now - TrickleFrameInput._last_frame_time
+            
+            if elapsed_since_last > self.HEALTH_CHECK_INTERVAL_SECONDS:
+                # Check if background tasks are still alive
+                tasks_alive = controller.check_tasks_alive()
+                if not tasks_alive:
+                    health = controller.get_health()
+                    error_msg = health.get("last_error", "stream tasks exited")
+                    LOGGER.error(
+                        "TrickleFrameInput: Stream died (detected via task check after %.1fs gap): %s",
+                        elapsed_since_last, error_msg,
+                    )
+                    raise RuntimeError(
+                        f"Trickle stream ended: {error_msg}. "
+                        "Re-run workflow to start a new stream."
+                    )
             
             # Check stream state for more specific handling
             state = controller._stream_state
+            running = controller.running
+            
+            # Log state for debugging (only occasionally to avoid spam)
+            if controller.frames_sent % 30 == 0:
+                LOGGER.debug(
+                    "TrickleFrameInput: state=%s running=%s frames_sent=%d",
+                    state.value, running, controller.frames_sent,
+                )
+            
             if state == NetworkController.StreamState.IDLE:
                 LOGGER.warning(
                     "TrickleFrameInput: Stream in IDLE state, dropping frame. "
@@ -1051,21 +1316,48 @@ class TrickleFrameInput:
                 )
                 return ()
             
+            # Stream is dead - raise error to stop workflow
             if state in (NetworkController.StreamState.ERROR, NetworkController.StreamState.CLOSED):
                 health = controller.get_health()
                 error_msg = health.get("last_error", "")
+                LOGGER.error(
+                    "TrickleFrameInput: Stream ended (state=%s, error=%s)",
+                    state.value, error_msg,
+                )
                 raise RuntimeError(
-                    f"Trickle stream ended (state={state.value}): {error_msg or 'unknown error'}. "
+                    f"Trickle stream ended (state={state.value}): {error_msg or 'stream closed'}. "
+                    "Re-run workflow to start a new stream."
+                )
+            
+            # Also check running flag - if False but state not ERROR/CLOSED, stream died unexpectedly
+            if not running and state not in (NetworkController.StreamState.STARTING,):
+                health = controller.get_health()
+                error_msg = health.get("last_error", "")
+                LOGGER.error(
+                    "TrickleFrameInput: Stream not running (state=%s, error=%s)",
+                    state.value, error_msg,
+                )
+                raise RuntimeError(
+                    f"Trickle stream stopped (state={state.value}): {error_msg or 'publisher stopped'}. "
                     "Re-run workflow to start a new stream."
                 )
             
             # STARTING, RUNNING, DEGRADED states - check is_healthy for grace period logic
-            if not controller.is_healthy():
-                health = controller.get_health()
-                error_msg = health.get("last_error", "")
-                raise RuntimeError(f"Trickle stream not healthy: {error_msg or 'unknown error'}")
+            if state == NetworkController.StreamState.STARTING:
+                # Allow frames during startup grace period
+                if not controller.is_healthy():
+                    health = controller.get_health()
+                    error_msg = health.get("last_error", "")
+                    raise RuntimeError(
+                        f"Trickle stream failed to start: {error_msg or 'startup timeout'}. "
+                        "Re-run workflow to try again."
+                    )
             
             enqueue_tensor_frame(image)
+            
+            # Update last frame time for health check interval tracking
+            TrickleFrameInput._last_frame_time = time.perf_counter()
+            
             LOGGER.debug(
                 "Trickle frame enqueued (loop_ready=%s depth=%s state=%s)",
                 has_loop(),
@@ -1078,44 +1370,89 @@ class TrickleFrameInput:
 class TrickleFrameOutput:
     """
     Retrieve the latest decoded frame from the trickle subscriber.
+    
+    The subscriber is automatically started by StartTrickleStream and runs in
+    the background, storing the latest output frame in a shared bridge.
+    This node returns the most recent frame and displays a preview.
     """
 
     def __init__(self):
         self._blank = self._blank_tensor()
+        self._output_dir = folder_paths.get_temp_directory()
+        self._type = "temp"
+        self._prefix = "trickle_output"
 
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
-        return {"optional": {}}
+        return {
+            "optional": {},
+        }
 
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("image",)
     FUNCTION = "pull_frame"
     CATEGORY = "Trickle"
-    OUTPUT_NODE = True
+    OUTPUT_NODE = True  # Always executes and shows preview
 
     @classmethod
-    def IS_CHANGED(cls, **kwargs) -> bool:
-        return True
+    def IS_CHANGED(cls, **kwargs) -> float:
+        # NaN != NaN, so this always triggers re-execution
+        return float("nan")
 
     def pull_frame(self):
         """Pull the latest frame from the trickle subscriber (synchronous)."""
+        from PIL import Image
+        
+        # Check if subscriber is active
+        subscriber = _NETWORK_RUNTIME.subscriber
+        if not subscriber:
+            return self._return_with_preview(self._blank)
+        
+        # Check if task has crashed
+        task_error = subscriber.check_task_exception()
+        if task_error:
+            LOGGER.warning("TrickleFrameOutput: Subscriber task crashed: %s", task_error)
+        
+        if not subscriber.running and not subscriber.task_alive:
+            return self._return_with_preview(self._blank)
+        
         try:
-            frame_np, timestamp, has_frame = WHEP_FRAME_BRIDGE.get_frame_or_blank_sync()
-            if has_frame:
-                LOGGER.debug(
-                    "TrickleFrameOutput got frame %sx%s (timestamp=%.2f)",
-                    frame_np.shape[1],
-                    frame_np.shape[0],
-                    timestamp,
-                )
+            frame_np, timestamp, has_frame = TRICKLE_OUTPUT_BRIDGE.get_frame_or_blank_sync()
             tensor = torch.from_numpy(frame_np.astype(np.float32) / 255.0).unsqueeze(0)
-            return (tensor,)
+            return self._return_with_preview(tensor)
         except Exception as exc:
-            LOGGER.error("Failed to pull trickle frame: %s", exc)
-            return (self._blank,)
+            LOGGER.error("TrickleFrameOutput error: %s", exc)
+            return self._return_with_preview(self._blank)
+
+    def _return_with_preview(self, tensor: torch.Tensor):
+        """Return tensor with UI preview."""
+        from PIL import Image
+        import uuid
+        
+        results = []
+        for img_tensor in tensor:
+            # Convert tensor to PIL Image
+            img_np = (img_tensor.cpu().numpy() * 255).astype(np.uint8)
+            img = Image.fromarray(img_np)
+            
+            # Save to temp directory
+            filename = f"{self._prefix}_{uuid.uuid4().hex[:8]}.png"
+            filepath = os.path.join(self._output_dir, filename)
+            img.save(filepath, compress_level=1)
+            
+            results.append({
+                "filename": filename,
+                "subfolder": "",
+                "type": self._type,
+            })
+        
+        return {
+            "ui": {"images": results},
+            "result": (tensor,),
+        }
 
     @staticmethod
-    def _blank_tensor(width: int = 1280, height: int = 720) -> torch.Tensor:
+    def _blank_tensor(width: int = 512, height: int = 512) -> torch.Tensor:
         blank = torch.zeros((height, width, 3), dtype=torch.float32)
         return blank.unsqueeze(0)
 

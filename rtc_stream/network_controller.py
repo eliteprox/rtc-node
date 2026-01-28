@@ -115,7 +115,6 @@ class NetworkController:
         model_id: Optional[str] = None,
         params: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
-        stream_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         self._ensure_loop()
         if not self.loop:
@@ -126,7 +125,6 @@ class NetworkController:
                 model_id=model_id or self.config.model_id,
                 params=params or {},
                 request_id=request_id,
-                stream_id=stream_id,
             ),
             self.loop,
         )
@@ -167,7 +165,6 @@ class NetworkController:
         model_id: str,
         params: Dict[str, Any],
         request_id: Optional[str],
-        stream_id: Optional[str],
     ) -> Dict[str, Any]:
         _ensure_allow_http_signer()
         await self._stop_async()
@@ -191,7 +188,6 @@ class NetworkController:
                 model_id=model_id,
                 params=params or None,
                 request_id=request_id,
-                stream_id=stream_id,
             ),
             signer_base_url=self.config.signer_url,
         )
@@ -292,14 +288,36 @@ class NetworkController:
                 else:
                     self._stream_state = self.StreamState.DEGRADED
             except Exception as exc:  # pragma: no cover - network/encode errors
-                LOGGER.warning("Failed to publish frame: %s", exc)
+                exc_str = str(exc).lower()
+                # Detect fatal errors (404 stream not found, POST failed, encoder failed, etc.)
+                is_fatal = (
+                    "404" in exc_str or
+                    "status=404" in exc_str or
+                    "not found" in exc_str or
+                    "stream not found" in exc_str or
+                    "post failed" in exc_str or
+                    "encoder failed" in exc_str or
+                    "mediapublish" in exc_str
+                )
+                if is_fatal:
+                    LOGGER.error("Stream terminated (fatal error): %s", exc)
+                    self._stream_state = self.StreamState.ERROR
+                    self._last_error = str(exc)
+                    self.running = False
+                    if self._stop_event:
+                        self._stop_event.set()
+                    break
+                LOGGER.warning("Failed to publish frame (will retry): %s", exc)
 
             next_frame_time += frame_interval
             # Prevent drift on large delays
             if next_frame_time < time.perf_counter() - frame_interval:
                 next_frame_time = time.perf_counter() + frame_interval
 
-        LOGGER.info("Publisher loop exit")
+        # Mark as not running when loop exits
+        if self._stream_state == self.StreamState.ERROR:
+            self.running = False
+        LOGGER.info("Publisher loop exit (state=%s, running=%s)", self._stream_state.value, self.running)
 
     async def _events_monitor_loop(self) -> None:
         """
@@ -338,6 +356,13 @@ class NetworkController:
 
         if self._stream_state not in (self.StreamState.ERROR, self.StreamState.CLOSED):
             self._stream_state = self.StreamState.CLOSED
+            self._last_error = "Events stream closed"
+            LOGGER.info("Events stream closed, marking stream as CLOSED")
+        
+        # Signal that stream has ended
+        self.running = False
+        if self._stop_event:
+            self._stop_event.set()
 
     def get_health(self) -> Dict[str, Any]:
         """
@@ -362,6 +387,44 @@ class NetworkController:
         if self._stream_state == self.StreamState.STARTING and self._started_at is not None:
             return (time.perf_counter() - self._started_at) <= self._events_wait_seconds
         return False
+
+    def check_tasks_alive(self) -> bool:
+        """
+        Check if background tasks (publisher, events) are still running.
+        This is a quick non-blocking check to detect if the stream has died.
+        Returns True if tasks are alive, False if any task has exited.
+        """
+        if not self.running:
+            return False
+        
+        # Check if publisher task has finished (exited = stream dead)
+        if self._publisher_task and self._publisher_task.done():
+            exc = self._publisher_task.exception() if not self._publisher_task.cancelled() else None
+            if exc:
+                LOGGER.warning("Publisher task exited with exception: %s", exc)
+                self._last_error = str(exc)
+            else:
+                LOGGER.warning("Publisher task exited")
+            self._stream_state = self.StreamState.CLOSED
+            self.running = False
+            return False
+        
+        # Check if events task has finished (events stream closed = stream likely dead)
+        if self._events_task and self._events_task.done():
+            exc = self._events_task.exception() if not self._events_task.cancelled() else None
+            if exc:
+                LOGGER.warning("Events task exited with exception: %s", exc)
+                if not self._last_error:
+                    self._last_error = str(exc)
+            else:
+                LOGGER.debug("Events task exited (stream closed)")
+            # Events closing doesn't immediately mean error, but indicates stream ended
+            if self._stream_state not in (self.StreamState.ERROR,):
+                self._stream_state = self.StreamState.CLOSED
+            self.running = False
+            return False
+        
+        return True
 
     def _to_av_frame(self, frame: np.ndarray, pts: int, time_base: Fraction) -> av.VideoFrame:
         rgb = normalize_uint8_frame(frame)

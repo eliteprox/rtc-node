@@ -29,6 +29,26 @@ class FrameBridge:
         self._dropped_before_loop = 0
 
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        # If attaching to a new/different loop, recreate the queue
+        # This prevents "Queue bound to different event loop" errors
+        if self.loop is not loop:
+            # Drain any items from the old queue into the buffer first
+            if self.loop is not None:
+                try:
+                    while True:
+                        frame = self.queue.get_nowait()
+                        self._buffer.append(frame)
+                except QueueEmpty:
+                    pass
+                LOGGER.info(
+                    "FrameBridge detaching from old loop, saved %d frames to buffer",
+                    len(self._buffer),
+                )
+            
+            # Create a new queue for the new loop
+            self.queue = asyncio.Queue(maxsize=self.max_size)
+            LOGGER.info("FrameBridge created new queue for loop %s", loop)
+        
         self.loop = loop
         LOGGER.info("FrameBridge attached to loop %s", loop)
         if self._buffer:
@@ -73,12 +93,7 @@ class FrameBridge:
         if frame.dtype != np.uint8:
             frame = np.clip(frame, 0, 255).astype(np.uint8)
         self._schedule_put(frame[:, :, :3])
-        LOGGER.info(
-            "FrameBridge queued frame %sx%s (depth=%s)",
-            frame.shape[1],
-            frame.shape[0],
-            self.depth(),
-        )
+        print(f"FrameBridge queued frame {frame.shape[1]}x{frame.shape[0]} (depth={self.depth()})")
 
     def try_get_nowait(self) -> Optional[np.ndarray]:
         try:
@@ -96,6 +111,25 @@ class FrameBridge:
             "depth": self.depth(),
             "dropped_before_loop": self._dropped_before_loop,
         }
+
+    def reset(self) -> None:
+        """
+        Reset the bridge state, clearing the queue and loop reference.
+        Call this when stopping a stream to ensure clean state for next stream.
+        """
+        # Drain queue into buffer for potential reuse
+        try:
+            while True:
+                frame = self.queue.get_nowait()
+                self._buffer.append(frame)
+        except QueueEmpty:
+            pass
+        
+        # Clear the loop reference so next attach_loop creates fresh queue
+        self.loop = None
+        # Create a fresh queue (not bound to any loop)
+        self.queue = asyncio.Queue(maxsize=self.max_size)
+        LOGGER.info("FrameBridge reset (buffered=%d frames)", len(self._buffer))
 
 
 FRAME_BRIDGE = FrameBridge()
